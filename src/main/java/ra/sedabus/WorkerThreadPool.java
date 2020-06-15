@@ -14,10 +14,6 @@ import java.util.logging.Logger;
 
 /**
  * Thread pool for WorkerThreads.
- *
- * TODO: Improve teardown
- * TODO: Improve configuration options
- *
  */
 final class WorkerThreadPool extends AppThread {
 
@@ -59,34 +55,23 @@ final class WorkerThreadPool extends AppThread {
     }
 
     private boolean startPool() {
-        int index = 0;
         status = Status.Starting;
         pool = Executors.newFixedThreadPool(maxPoolSize);
         status = Status.Running;
-        final long printPeriodMs = 5000; // print * every 5 seconds
-        final long waitPeriodMs = 500; // wait half a second
-        long currentWait = 0;
         LOG.info("Thread pool starting...");
         while(spin.get()) {
             Wait.aMs(100);
             synchronized (SEDABus.channelLock) {
-                namedChannels.forEach((k, v) -> {
-//                try {
-//                    if(currentWait > printPeriodMs) {
-//                        LOG.finest("*");
-//                        currentWait = 0;
-//                    }
-//                    int queueSize = channel.getQueue().size();
-//                    if(queueSize > 0) {
-//                        LOG.finest("Queue Size = "+queueSize+" : Launching thread...");
-//                        pool.execute(WorkerThread(channel, consumer));
-//                    } else {
-//                        currentWait += waitPeriodMs;
-//                        this.wait(waitPeriodMs); // wait 500ms
-//                    }
-//                } catch (InterruptedException e) {
-//
-//                }
+                namedChannels.forEach((name, ch) -> {
+                    if(ch.getFlush()) {
+                        // Flush Channel
+                        while(ch.getQueue().size() > 0) {
+                            pool.execute(ch::receive);
+                        }
+                        ch.setFlush(false);
+                    } else if (ch.getQueue().size() > 0) {
+                        pool.execute(ch::receive);
+                    }
                 });
             }
         }
@@ -94,18 +79,14 @@ final class WorkerThreadPool extends AppThread {
     }
 
     boolean shutdown() {
+        LOG.info("Shutting down...");
         status = Status.Stopping;
         spin.set(false);
         pool.shutdown();
         try {
-            if (!pool.awaitTermination(60, TimeUnit.SECONDS)) {
+            if (!pool.awaitTermination(2, TimeUnit.SECONDS)) {
                 // pool didn't terminate after the first try
                 pool.shutdownNow();
-            }
-
-
-            if (!pool.awaitTermination(60, TimeUnit.SECONDS)) {
-                // pool didn't terminate after the second try
             }
         } catch (InterruptedException ex) {
             pool.shutdownNow();

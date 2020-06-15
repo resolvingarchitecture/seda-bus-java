@@ -13,7 +13,10 @@ import java.util.Properties;
 import java.util.logging.Logger;
 
 /**
- * Staged Event-Driven Architectural Bus
+ * Staged Event-Driven Architectural Bus supporting push-model async messaging
+ * and pull-model (polling). To use the push-model, register a MessageConsumer.
+ * To use the pull-model, use the returned MessageChannel from registering a
+ * channel to poll against.
  */
 public class SEDABus implements LifeCycle {
 
@@ -77,40 +80,43 @@ public class SEDABus implements LifeCycle {
         }
     }
 
-    public void registerChannel(String channelName) {
+    public MessageChannel registerChannel(String channelName) {
         MessageChannel ch = new MessageChannel(channelName);
         if(!ch.start(config)) {
             LOG.warning("Channel failed to start.");
-            return;
+            return null;
         }
         synchronized (channelLock) {
             namedChannels.put(channelName, ch);
         }
+        return ch;
     }
 
-    public void registerChannel(String channelName, ServiceLevel serviceLevel) {
+    public MessageChannel registerChannel(String channelName, ServiceLevel serviceLevel) {
         MessageChannel ch = new MessageChannel(channelName, serviceLevel);
         if(!ch.start(config)) {
             LOG.warning("Channel failed to start.");
-            return;
+            return null;
         }
         synchronized (channelLock) {
             namedChannels.put(channelName, ch);
         }
+        return ch;
     }
 
-    public void registerChannel(String channelName, int maxSize, boolean pubSub, ServiceLevel serviceLevel, Class dataTypeFilter) {
+    public MessageChannel registerChannel(String channelName, int maxSize, boolean pubSub, ServiceLevel serviceLevel, Class dataTypeFilter) {
         MessageChannel ch = new MessageChannel(channelName, maxSize, dataTypeFilter, serviceLevel, pubSub);
         if(!ch.start(config)) {
             LOG.warning("Channel failed to start.");
-            return;
+            return null;
         }
         synchronized (channelLock) {
             namedChannels.put(channelName, ch);
         }
+        return ch;
     }
 
-    public boolean registerConsumer(String channelName, MessageConsumer consumer) {
+    public boolean registerAsynchConsumer(String channelName, MessageConsumer consumer) {
         MessageChannel ch = namedChannels.get(channelName);
         ch.registerConsumer(consumer);
         return true;
@@ -142,12 +148,19 @@ public class SEDABus implements LifeCycle {
 
     @Override
     public boolean shutdown() {
-        return false;
+        synchronized (channelLock) {
+            namedChannels.forEach((name, ch) -> {
+                ch.pause();
+                ch.setFlush(true);
+            });
+        }
+        pool.shutdown();
+        return true;
     }
 
     @Override
     public boolean gracefulShutdown() {
-        return false;
+        return shutdown();
     }
 
     public static void main(String[] args) {

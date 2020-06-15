@@ -1,6 +1,7 @@
 package ra.sedabus;
 
 import ra.common.*;
+import ra.util.Config;
 import ra.util.FileUtil;
 import ra.util.SystemSettings;
 
@@ -62,6 +63,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
 
     private static final Logger LOG = Logger.getLogger(MessageChannel.class.getName());
 
+    private Properties config;
     private boolean accepting = false;
     private BlockingQueue<Envelope> queue;
 
@@ -74,6 +76,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
     private Boolean pubSub = false;
     private List<MessageConsumer> consumers;
     private int roundRobin = 0;
+    private boolean flush = false;
 
     // Channel with Defaults - 10 capacity, no data type filter, fire and forget (in-memory only), point-to-point
     // Name must be unique if creating multiple channels otherwise storage will get stomped over if guaranteed delivery used.
@@ -98,14 +101,18 @@ final class MessageChannel implements MessageProducer, LifeCycle {
         return queue;
     }
 
+    String getName() {
+        return name;
+    }
+
     void registerConsumer(MessageConsumer consumer) {
         consumers.add(consumer);
     }
 
     void ack(Envelope envelope) {
-        LOG.finest(Thread.currentThread().getName()+": Removing Envelope-"+envelope.getId()+"("+envelope+") from message queue (size="+queue.size()+")");
+        LOG.info(Thread.currentThread().getName()+": Removing Envelope-"+envelope.getId()+"("+envelope+") from message queue (size="+queue.size()+")");
         queue.remove(envelope);
-        LOG.finest(Thread.currentThread().getName()+": Removed Envelope-"+envelope.getId()+"("+envelope+") from message queue (size="+queue.size()+")");
+        LOG.info(Thread.currentThread().getName()+": Removed Envelope-"+envelope.getId()+"("+envelope+") from message queue (size="+queue.size()+")");
     }
 
     /**
@@ -118,7 +125,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
             if (serviceLevel == ServiceLevel.AtMostOnce) {
                 try {
                     if(queue.add(e))
-                        LOG.finest(Thread.currentThread().getName() + ": Envelope-" + e.getId() + "(" + e + ") added to message queue (size=" + queue.size() + ")");
+                        LOG.info(Thread.currentThread().getName() + ": Envelope-" + e.getId() + "(" + e + ") added to message queue (size=" + queue.size() + ")");
                 } catch (IllegalStateException ex) {
                     String errMsg = Thread.currentThread().getName() + ": Channel at capacity; rejected Envelope-" + e.getId() + "(" + e + ").";
                     DLC.addErrorMessage(errMsg, e);
@@ -129,7 +136,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
                 // Guaranteed
                 try {
                     if(persist(e) && queue.add(e))
-                        LOG.finest(Thread.currentThread().getName()+": Envelope-"+e.getId()+"("+e+") added to message queue (size="+queue.size()+")");
+                        LOG.info(Thread.currentThread().getName()+": Envelope-"+e.getId()+"("+e+") added to message queue (size="+queue.size()+")");
                 } catch (IllegalStateException ex) {
                     String errMsg = Thread.currentThread().getName()+": Channel at capacity; rejected Envelope-"+e.getId()+"("+e+").";
                     DLC.addErrorMessage(errMsg, e);
@@ -138,7 +145,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
                 }
             }
         } else {
-            String errMsg = Thread.currentThread().getName()+": Not accepting envelopes yet.";
+            String errMsg = Thread.currentThread().getName()+": Not accepting envelopes.";
             DLC.addErrorMessage(errMsg, e);
             LOG.warning(errMsg);
             return false;
@@ -148,6 +155,8 @@ final class MessageChannel implements MessageProducer, LifeCycle {
 
     /**
      * Receive envelope from channel with blocking.
+     * Process all registered async Message Consumers if present.
+     * Return Envelope in case called by polling Message Consumer.
      * @return Envelope
      */
     public Envelope receive() {
@@ -156,30 +165,17 @@ final class MessageChannel implements MessageProducer, LifeCycle {
             LOG.info(Thread.currentThread().getName()+": Requesting envelope from message queue, blocking...");
             next = queue.take();
             LOG.info(Thread.currentThread().getName()+": Got Envelope-"+next.getId()+"("+next+") (queue size="+queue.size()+")");
-            if(pubSub) {
-                Envelope env;
-                for(MessageConsumer c : consumers) {
-                    env = Envelope.envelopeFactory(next);
-                    if(!c.receive(env)) {
-                        LOG.warning("MessageConsumer.receive() failed during pubsub.");
-                    }
-                }
-            } else {
-                // Point-to-Point
-                if(roundRobin == consumers.size()) roundRobin = 0;
-                MessageConsumer c = consumers.get(roundRobin++);
-                if(!c.receive(next)) {
-                    LOG.warning("MessageConsumer.receive() failed during point-to-point.");
-                }
-            }
         } catch (InterruptedException e) {
             // No need to log
         }
+        process(next);
         return next;
     }
 
     /**
      * Receive envelope from channel with blocking until timeout.
+     * Process all registered async Message Consumers if present.
+     * Return Envelope in case called by polling Message Consumer.
      * @param timeout in milliseconds
      * @return Envelope
      */
@@ -190,19 +186,58 @@ final class MessageChannel implements MessageProducer, LifeCycle {
         } catch (InterruptedException e) {
             // No need to log
         }
+        process(next);
         return next;
     }
 
     /**
      * Check the channel for an Envelope returning immediately regardless
      * if an Envelope was found or not. Returns null if no Envelope found.
+     * Process all registered async Message Consumers if present.
+     * Return Envelope in case called by polling Message Consumer.
      * @return Envelope
      */
     public Envelope poll() {
-        return queue.poll();
+        Envelope next = queue.poll();
+        process(next);
+        return next;
+    }
+
+    private void process(Envelope envelope) {
+        if(envelope!=null && consumers!=null && consumers.size() > 0) {
+            if (pubSub) {
+                Envelope env;
+                for (MessageConsumer c : consumers) {
+                    env = Envelope.envelopeFactory(envelope);
+                    if (c.receive(env)) {
+
+                    } else {
+                        LOG.warning("MessageConsumer.receive() failed during pubsub.");
+                    }
+                }
+            } else {
+                // Point-to-Point
+                if (roundRobin == consumers.size()) roundRobin = 0;
+                MessageConsumer c = consumers.get(roundRobin++);
+                if (c.receive(envelope)) {
+                    ack(envelope);
+                } else {
+                    LOG.warning("MessageConsumer.receive() failed during point-to-point.");
+                }
+            }
+        }
+    }
+
+    public void setFlush(boolean flush) {
+        this.flush = flush;
+    }
+
+    public boolean getFlush() {
+        return flush;
     }
 
     public boolean start(Properties properties) {
+        config = properties;
         String baseLocation;
         File baseLocDir;
         if(properties.contains("ra.sedabus.channel.locationBase")) {
@@ -233,15 +268,17 @@ final class MessageChannel implements MessageProducer, LifeCycle {
     }
 
     public boolean pause() {
-        return false;
+        accepting = false;
+        return true;
     }
 
     public boolean unpause() {
-        return false;
+        accepting = true;
+        return true;
     }
 
     public boolean restart() {
-        return false;
+        return shutdown() && start(config);
     }
 
     public boolean shutdown() {

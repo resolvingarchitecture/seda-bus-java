@@ -25,6 +25,7 @@ public class SEDABusTest {
     @AfterClass
     public static void tearDown() {
         LOG.info("Teardown...");
+        bus.gracefulShutdown();
     }
 
     @Test
@@ -40,7 +41,7 @@ public class SEDABusTest {
         };
         bus.registerChannel("A");
         bus.registerChannel("B");
-        bus.registerConsumer("B", consumer);
+        bus.registerAsynchConsumer("B", consumer);
         Envelope env = Envelope.documentFactory(id);
         DLC.addRoute("B","Send", env);
         bus.publish(env);
@@ -60,7 +61,7 @@ public class SEDABusTest {
         Assert.assertTrue(true);
     }
 
-    @Test(timeout = 1000)
+    @Test
     public void exactlyOnce() {
         LOG.info("Exactly Once...");
 
