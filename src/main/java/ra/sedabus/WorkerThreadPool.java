@@ -81,7 +81,7 @@ final class WorkerThreadPool extends AppThread {
         }
         pool = Executors.newFixedThreadPool(maxPoolSize);
         status = Status.Running;
-        LOG.info("Thread pool starting...");
+        LOG.info("Thread pool starting with "+maxPoolSize+" worker threads...");
         while(spin.get()) {
             Wait.aMs(100);
             synchronized (SEDABus.channelLock) {
