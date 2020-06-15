@@ -123,7 +123,9 @@ final class MessageChannel implements MessageProducer, LifeCycle {
 
     void ack(Envelope envelope) {
         LOG.info(Thread.currentThread().getName()+": Removing Envelope-"+envelope.getId()+"("+envelope+") from message queue (size="+queue.size()+")");
-        queue.remove(envelope);
+        if(remove(envelope)) {
+            queue.remove(envelope);
+        }
         LOG.info(Thread.currentThread().getName()+": Removed Envelope-"+envelope.getId()+"("+envelope+") from message queue (size="+queue.size()+")");
     }
 
@@ -249,6 +251,33 @@ final class MessageChannel implements MessageProducer, LifeCycle {
         return flush;
     }
 
+    public boolean clearUnprocessed() {
+        boolean success = true;
+        File[] messages = channelDir.listFiles();
+        for(File jsonFile : messages) {
+            if(!jsonFile.delete())
+                success = false;
+        }
+        return success;
+    }
+
+    public boolean sendUnprocessed() {
+        File[] messages = channelDir.listFiles();
+        for(File jsonFile : messages) {
+            byte[] body;
+            try {
+                body = FileUtil.readFile(jsonFile.getAbsolutePath());
+            } catch (IOException e) {
+                LOG.warning(e.getLocalizedMessage());
+                continue;
+            }
+            Envelope e = new Envelope();
+            e.fromJSON(new String(body));
+            process(e);
+        }
+        return true;
+    }
+
     public boolean start(Properties properties) {
         config = properties;
         String baseLocation;
@@ -348,21 +377,12 @@ final class MessageChannel implements MessageProducer, LifeCycle {
         return FileUtil.writeFile(e.toJSON().getBytes(), jsonFile.getAbsolutePath());
     }
 
-    private Envelope load(Integer id) {
-        File jsonFile = new File(channelDir, id+".json");
-        if(!jsonFile.exists()) {
-            LOG.warning("Attempting to load Envelope from file system failed; file not present: "+id+".json in channel: "+name);
-            return null;
+    private boolean remove(Envelope e) {
+        File jsonFile = new File(channelDir, e.getId()+".json");
+        if(jsonFile.exists() && !jsonFile.delete()) {
+            LOG.warning("Unable to delete file of Envelope with id="+e.getId());
+            return false;
         }
-        byte[] body;
-        try {
-            body = FileUtil.readFile(jsonFile.getAbsolutePath());
-        } catch (IOException e) {
-            LOG.severe(e.getLocalizedMessage());
-            return null;
-        }
-        Envelope e = new Envelope();
-        e.fromJSON(new String(body));
-        return e;
+        return true;
     }
 }

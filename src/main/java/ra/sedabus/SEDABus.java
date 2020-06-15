@@ -10,6 +10,7 @@ import ra.util.Config;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
 /**
@@ -155,6 +156,28 @@ public class SEDABus implements LifeCycle {
         MessageChannel ch = namedChannels.get(channelName);
         ch.registerAsyncConsumer(consumer);
         return true;
+    }
+
+    public boolean clearUnprocessed() {
+        AtomicBoolean success = new AtomicBoolean(true);
+        synchronized (channelLock) {
+            namedChannels.forEach((name, ch) -> {
+                if(!ch.clearUnprocessed())
+                    success.set(false);
+            });
+        }
+        return success.get();
+    }
+
+    public boolean resumeUnprocessed() {
+        AtomicBoolean success = new AtomicBoolean(true);
+        synchronized (channelLock) {
+            namedChannels.forEach((name, ch) -> {
+                if(!ch.sendUnprocessed())
+                    success.set(false);
+            });
+        }
+        return success.get();
     }
 
     @Override
