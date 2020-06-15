@@ -5,7 +5,7 @@
 
     <groupId>resolvingarchitecture</groupId>
 	<artifactId>seda-bus</artifactId>
-	<version>0.6.5</version>
+	<version>1.0.0</version>
 
 	<packaging>jar</packaging>
 
