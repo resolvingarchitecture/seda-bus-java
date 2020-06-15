@@ -77,18 +77,35 @@ public class SEDABus implements LifeCycle {
     }
 
     public void registerChannel(String channelName) {
-        namedChannels.put(channelName, new MessageChannel(channelName));
+        MessageChannel ch = new MessageChannel(channelName);
+        if(!ch.start(config)) {
+            LOG.warning("Channel failed to start.");
+            return;
+        }
+        namedChannels.put(channelName, ch);
     }
 
     public void registerChannel(String channelName, ServiceLevel serviceLevel) {
-        namedChannels.put(channelName, new MessageChannel(channelName, serviceLevel));
+        MessageChannel ch = new MessageChannel(channelName, serviceLevel);
+        if(!ch.start(config)) {
+            LOG.warning("Channel failed to start.");
+            return;
+        }
+        namedChannels.put(channelName, ch);
     }
 
     public void registerChannel(String channelName, int maxSize, boolean pubSub, ServiceLevel serviceLevel, Class dataTypeFilter) {
-        namedChannels.put(channelName, new MessageChannel(channelName, maxSize, dataTypeFilter, serviceLevel, pubSub));
+        MessageChannel ch = new MessageChannel(channelName, maxSize, dataTypeFilter, serviceLevel, pubSub);
+        if(!ch.start(config)) {
+            LOG.warning("Channel failed to start.");
+            return;
+        }
+        namedChannels.put(channelName, ch);
     }
 
     public boolean registerConsumer(String channelName, MessageConsumer consumer) {
+        MessageChannel ch = namedChannels.get(channelName);
+        ch.registerConsumer(consumer);
         return true;
     }
 

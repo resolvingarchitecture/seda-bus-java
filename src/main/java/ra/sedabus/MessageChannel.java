@@ -6,7 +6,9 @@ import ra.util.SystemSettings;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -34,10 +36,7 @@ import java.util.logging.Logger;
  * When the service level is ExactlyOnce, the channel performs a two-phase commit with the Consumer to ensure the Envelope
  * is received and that it is only sent once.
  *
- * When a Service Level within an Envelope is different than the channel's setting, the
- * most restrictive setting is enforced, e.g. if the Channel's service level is AtMostOnce and an incoming Envelope's
- * setting is AtLeastOnce, AtLeastOnce will be enforced and if the Channel's service level was then changed to ExactlyOnce,
- * future messages with Service Levels set to AtLeastOnce would result in the channel enforcing ExactlyOnce regardless.
+ * When a Service Level within an Envelope is provided, it is used instead of the channel's default.
  *
  * When the dataTypeFilter is set, the channel acts as a Datatype Channel whereby incoming Envelope is ignored if not of
  * that datatype. Therefore, all of the messages on a given channel will contain the same type of data.
@@ -73,6 +72,8 @@ final class MessageChannel implements MessageProducer, LifeCycle {
     private Class dataTypeFilter;
     private ServiceLevel serviceLevel = ServiceLevel.AtLeastOnce;
     private Boolean pubSub = false;
+    private List<MessageConsumer> consumers;
+    private int roundRobin = 0;
 
     // Channel with Defaults - 10 capacity, no data type filter, fire and forget (in-memory only), point-to-point
     // Name must be unique if creating multiple channels otherwise storage will get stomped over if guaranteed delivery used.
@@ -97,6 +98,10 @@ final class MessageChannel implements MessageProducer, LifeCycle {
         return queue;
     }
 
+    void registerConsumer(MessageConsumer consumer) {
+        consumers.add(consumer);
+    }
+
     void ack(Envelope envelope) {
         LOG.finest(Thread.currentThread().getName()+": Removing Envelope-"+envelope.getId()+"("+envelope+") from message queue (size="+queue.size()+")");
         queue.remove(envelope);
@@ -109,7 +114,8 @@ final class MessageChannel implements MessageProducer, LifeCycle {
      */
     public boolean send(Envelope e) {
         if(accepting) {
-            if (e.getServiceLevel() == ServiceLevel.AtMostOnce) {
+            ServiceLevel serviceLevel = e.getServiceLevel() == null ? this.serviceLevel : e.getServiceLevel();
+            if (serviceLevel == ServiceLevel.AtMostOnce) {
                 try {
                     if(queue.add(e))
                         LOG.finest(Thread.currentThread().getName() + ": Envelope-" + e.getId() + "(" + e + ") added to message queue (size=" + queue.size() + ")");
@@ -147,9 +153,25 @@ final class MessageChannel implements MessageProducer, LifeCycle {
     public Envelope receive() {
         Envelope next = null;
         try {
-            LOG.finest(Thread.currentThread().getName()+": Requesting envelope from message queue, blocking...");
+            LOG.info(Thread.currentThread().getName()+": Requesting envelope from message queue, blocking...");
             next = queue.take();
-            LOG.finest(Thread.currentThread().getName()+": Got Envelope-"+next.getId()+"("+next+") (queue size="+queue.size()+")");
+            LOG.info(Thread.currentThread().getName()+": Got Envelope-"+next.getId()+"("+next+") (queue size="+queue.size()+")");
+            if(pubSub) {
+                Envelope env;
+                for(MessageConsumer c : consumers) {
+                    env = Envelope.envelopeFactory(next);
+                    if(!c.receive(env)) {
+                        LOG.warning("MessageConsumer.receive() failed during pubsub.");
+                    }
+                }
+            } else {
+                // Point-to-Point
+                if(roundRobin == consumers.size()) roundRobin = 0;
+                MessageConsumer c = consumers.get(roundRobin++);
+                if(!c.receive(next)) {
+                    LOG.warning("MessageConsumer.receive() failed during point-to-point.");
+                }
+            }
         } catch (InterruptedException e) {
             // No need to log
         }
@@ -205,6 +227,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
             return false;
         }
         queue = new ArrayBlockingQueue<>(capacity);
+        consumers = new ArrayList<>();
         accepting = true;
         return true;
     }

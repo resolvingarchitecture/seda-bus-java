@@ -30,7 +30,7 @@ public class SEDABusTest {
         LOG.info("Teardown...");
     }
 
-    @Test(timeout = 1000)
+    @Test
     public void verifyPointToPoint() {
         int id = 1234;
         MessageConsumer consumer = new MessageConsumer() {
@@ -46,18 +46,17 @@ public class SEDABusTest {
         bus.registerConsumer("B", consumer);
         Envelope env = Envelope.documentFactory(id);
         DLC.addRoute("B","Send", env);
-        env.getDynamicRoutingSlip().nextRoute();
         bus.publish(env);
     }
 
-    @Test(timeout = 1000)
+    @Test
     public void atMostOnce() {
         LOG.info("At Most Once...");
 
         Assert.assertTrue(true);
     }
 
-    @Test(timeout = 1000)
+    @Test
     public void atLeastOnce() {
         LOG.info("At Least Once...");
 
