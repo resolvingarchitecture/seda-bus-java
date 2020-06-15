@@ -20,7 +20,8 @@ public class SEDABusTest {
     public static void init() {
         LOG.info("Init...");
         Properties props = new Properties();
-        bus = SEDABus.getInstance(props);
+        bus = new SEDABus();
+        bus.start(props);
     }
 
     @AfterClass

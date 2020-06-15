@@ -1,9 +1,6 @@
 package ra.sedabus;
 
-import ra.common.Envelope;
-import ra.common.LifeCycle;
-import ra.common.MessageConsumer;
-import ra.common.ServiceLevel;
+import ra.common.*;
 import ra.common.route.Route;
 import ra.util.Config;
 
@@ -19,13 +16,9 @@ import java.util.logging.Logger;
  * To use the pull-model, use the returned MessageChannel from registering a
  * channel to poll against.
  */
-public class SEDABus implements LifeCycle {
+public class SEDABus implements MessageBus {
 
     private static Logger LOG = Logger.getLogger(SEDABus.class.getName());
-
-    public enum Status {Starting, Running, Paused, Stopping, Stopped, Errored}
-
-    private static SEDABus instance;
 
     private static final Object instanceLock = new Object();
     public static final Object channelLock = new Object();
@@ -35,12 +28,13 @@ public class SEDABus implements LifeCycle {
     private WorkerThreadPool pool;
     private Status status = Status.Stopped;
 
-    private SEDABus(){}
+    public SEDABus(){}
 
     public Status getStatus() {
         return status;
     }
 
+    @Override
     public boolean publish(Envelope envelope) {
         if(status == Status.Running) {
             Route currentRoute = envelope.getDynamicRoutingSlip().getCurrentRoute();
@@ -60,29 +54,7 @@ public class SEDABus implements LifeCycle {
         return false;
     }
 
-    public static SEDABus getInstance(Properties properties) {
-        synchronized (instanceLock) {
-            if (instance == null) {
-                instance = new SEDABus();
-                try {
-                    instance.setConfig(properties);
-                } catch (Exception e) {
-                    LOG.severe(e.getLocalizedMessage());
-                    instance.status = Status.Errored;
-                    instance = null;
-                    return null;
-                }
-            }
-            if(instance.status == Status.Stopped) {
-                if(!instance.start(properties)) {
-                    LOG.severe("SEDABus start failed.");
-                    instance.status = Status.Errored;
-                }
-            }
-        }
-        return instance;
-    }
-
+    @Override
     public void setConfig(Properties properties) {
         try {
             this.config = Config.loadFromClasspath("ra-sedabus.config", properties, false);
@@ -92,8 +64,9 @@ public class SEDABus implements LifeCycle {
         }
     }
 
+    @Override
     public MessageChannel registerChannel(String channelName) {
-        MessageChannel ch = new MessageChannel(channelName);
+        MessageChannel ch = new SEDAMessageChannel(channelName);
         if(!ch.start(config)) {
             LOG.warning("Channel failed to start.");
             return null;
@@ -104,8 +77,9 @@ public class SEDABus implements LifeCycle {
         return ch;
     }
 
+    @Override
     public MessageChannel registerChannel(String channelName, ServiceLevel serviceLevel) {
-        MessageChannel ch = new MessageChannel(channelName, serviceLevel);
+        MessageChannel ch = new SEDAMessageChannel(channelName, serviceLevel);
         if(!ch.start(config)) {
             LOG.warning("Channel failed to start.");
             return null;
@@ -116,8 +90,9 @@ public class SEDABus implements LifeCycle {
         return ch;
     }
 
+    @Override
     public MessageChannel registerChannel(String channelName, int maxSize, ServiceLevel serviceLevel, Class dataTypeFilter, boolean pubSub) {
-        MessageChannel ch = new MessageChannel(channelName, maxSize, dataTypeFilter, serviceLevel, pubSub);
+        MessageChannel ch = new SEDAMessageChannel(channelName, maxSize, dataTypeFilter, serviceLevel, pubSub);
         if(!ch.start(config)) {
             LOG.warning("Channel failed to start.");
             return null;
@@ -137,8 +112,9 @@ public class SEDABus implements LifeCycle {
      * @param dataTypeFilter Data type filter for subscriber channel.
      * @return MessageChannel subscriber channel
      */
+    @Override
     public MessageChannel registerSubscriberChannel(String channelName, String subscriberChannelName, int maxSize, ServiceLevel serviceLevel, Class dataTypeFilter, boolean pubSub) {
-        MessageChannel sch = new MessageChannel(subscriberChannelName, maxSize, dataTypeFilter, serviceLevel, pubSub);
+        MessageChannel sch = new SEDAMessageChannel(subscriberChannelName, maxSize, dataTypeFilter, serviceLevel, pubSub);
         if(!sch.start(config)) {
             LOG.warning("Channel failed to start.");
             return null;
@@ -152,12 +128,14 @@ public class SEDABus implements LifeCycle {
         return sch;
     }
 
+    @Override
     public boolean registerAsynchConsumer(String channelName, MessageConsumer consumer) {
         MessageChannel ch = namedChannels.get(channelName);
         ch.registerAsyncConsumer(consumer);
         return true;
     }
 
+    @Override
     public boolean clearUnprocessed() {
         AtomicBoolean success = new AtomicBoolean(true);
         synchronized (channelLock) {
@@ -169,6 +147,7 @@ public class SEDABus implements LifeCycle {
         return success.get();
     }
 
+    @Override
     public boolean resumeUnprocessed() {
         AtomicBoolean success = new AtomicBoolean(true);
         synchronized (channelLock) {
@@ -183,6 +162,7 @@ public class SEDABus implements LifeCycle {
     @Override
     public boolean start(Properties properties) {
         status = Status.Starting;
+        setConfig(properties);
         namedChannels = new HashMap<>();
         pool = new WorkerThreadPool(namedChannels, properties);
         Thread d = new Thread(pool);

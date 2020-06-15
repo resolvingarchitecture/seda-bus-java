@@ -1,5 +1,7 @@
 package ra.sedabus;
 
+import ra.common.MessageChannel;
+import ra.common.Status;
 import ra.util.AppThread;
 import ra.util.Wait;
 
@@ -19,14 +21,12 @@ final class WorkerThreadPool extends AppThread {
 
     private static final Logger LOG = Logger.getLogger(WorkerThreadPool.class.getName());
 
-    public enum Status {Starting, Running, Stopping, Stopped}
-
     private Status status = Status.Stopped;
 
     private static final int NUMBER_OF_CORES = Runtime.getRuntime().availableProcessors();
 
     private ExecutorService pool;
-    private Map<String, MessageChannel> namedChannels;
+    private Map<String,MessageChannel> namedChannels;
     private Collection<MessageChannel> channels;
     private int poolSize = NUMBER_OF_CORES * 2; // default
     private int maxPoolSize = NUMBER_OF_CORES * 2; // default
@@ -65,23 +65,23 @@ final class WorkerThreadPool extends AppThread {
                 namedChannels.forEach((name, ch) -> {
                     if(ch.getFlush()) {
                         // Flush Channel
-                        while(ch.getQueue().size() > 0) {
+                        while(ch.queued() > 0) {
                             pool.execute(ch::receive);
                         }
                         // TODO: Subscription Channel consumers not picking up messages
                         if(ch.getSubscriptionChannels()!=null && ch.getSubscriptionChannels().size() > 0) {
                             ch.getSubscriptionChannels().forEach(sch -> {
-                                while(sch.getQueue().size() > 0) {
+                                while(sch.queued() > 0) {
                                     pool.execute(sch::receive);
                                 }
                             });
                         }
                         ch.setFlush(false);
-                    } else if (ch.getQueue().size() > 0) {
+                    } else if (ch.queued() > 0) {
                         pool.execute(ch::receive);
                         if(ch.getSubscriptionChannels()!=null && ch.getSubscriptionChannels().size() > 0) {
                             ch.getSubscriptionChannels().forEach(sch -> {
-                                if(sch.getQueue().size() > 0) {
+                                if(sch.queued() > 0) {
                                     pool.execute(sch::receive);
                                 }
                             });

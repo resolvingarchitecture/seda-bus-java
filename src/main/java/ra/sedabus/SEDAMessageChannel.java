@@ -58,9 +58,9 @@ import java.util.logging.Logger;
  * When Consumers subscribe to the channel with pubSub set to true, an additional Channel is created for the Consumer.
  *
  */
-final class MessageChannel implements MessageProducer, LifeCycle {
+final class SEDAMessageChannel implements MessageChannel {
 
-    private static final Logger LOG = Logger.getLogger(MessageChannel.class.getName());
+    private static final Logger LOG = Logger.getLogger(SEDAMessageChannel.class.getName());
 
     private Properties config;
     private boolean accepting = false;
@@ -80,16 +80,16 @@ final class MessageChannel implements MessageProducer, LifeCycle {
 
     // Channel with Defaults - 10 capacity, no data type filter, fire and forget (in-memory only), point-to-point
     // Name must be unique if creating multiple channels otherwise storage will get stomped over if guaranteed delivery used.
-    MessageChannel(String name) {
+    SEDAMessageChannel(String name) {
         this.name = name;
     }
 
-    MessageChannel(String name, ServiceLevel serviceLevel) {
+    SEDAMessageChannel(String name, ServiceLevel serviceLevel) {
         this.name = name;
         this.serviceLevel = serviceLevel;
     }
 
-    MessageChannel(String name, int capacity, Class dataTypeFilter, ServiceLevel serviceLevel, Boolean pubSub) {
+    SEDAMessageChannel(String name, int capacity, Class dataTypeFilter, ServiceLevel serviceLevel, Boolean pubSub) {
         this.name = name;
         this.capacity = capacity;
         this.dataTypeFilter = dataTypeFilter;
@@ -101,27 +101,40 @@ final class MessageChannel implements MessageProducer, LifeCycle {
         return queue;
     }
 
-    String getName() {
+    @Override
+    public String getName() {
         return name;
     }
 
-    boolean getPubSub() {
+    @Override
+    public int queued() {
+        if(queue!=null)
+            return queue.size();
+        return 0;
+    }
+
+    @Override
+    public boolean getPubSub() {
         return pubSub;
     }
 
-    void registerAsyncConsumer(MessageConsumer consumer) {
+    @Override
+    public void registerAsyncConsumer(MessageConsumer consumer) {
         consumers.add(consumer);
     }
 
-    void registerSubscriptionChannel(MessageChannel channel) {
+    @Override
+    public void registerSubscriptionChannel(MessageChannel channel) {
         subscriptionChannels.add(channel);
     }
 
-    List<MessageChannel> getSubscriptionChannels() {
+    @Override
+    public List<MessageChannel> getSubscriptionChannels() {
         return subscriptionChannels;
     }
 
-    void ack(Envelope envelope) {
+    @Override
+    public void ack(Envelope envelope) {
         LOG.info(Thread.currentThread().getName()+": Removing Envelope-"+envelope.getId()+"("+envelope+") from message queue (size="+queue.size()+")");
         if(remove(envelope)) {
             queue.remove(envelope);
@@ -133,6 +146,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
      * Send message on channel.
      * @param e Envelope
      */
+    @Override
     public boolean send(Envelope e) {
         if(accepting) {
             ServiceLevel serviceLevel = e.getServiceLevel() == null ? this.serviceLevel : e.getServiceLevel();
@@ -173,6 +187,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
      * Return Envelope in case called by polling Message Consumer.
      * @return Envelope
      */
+    @Override
     public Envelope receive() {
         Envelope next = null;
         try {
@@ -193,6 +208,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
      * @param timeout in milliseconds
      * @return Envelope
      */
+    @Override
     public Envelope receive(int timeout) {
         Envelope next = null;
         try {
@@ -211,6 +227,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
      * Return Envelope in case called by polling Message Consumer.
      * @return Envelope
      */
+    @Override
     public Envelope poll() {
         Envelope next = queue.poll();
         process(next);
@@ -223,7 +240,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
                 Envelope env;
                 for (MessageChannel sch : subscriptionChannels) {
                     env = Envelope.envelopeFactory(envelope);
-                    DLC.addRoute(sch.name, env.getDynamicRoutingSlip().getCurrentRoute().getOperation(), env);
+                    DLC.addRoute(sch.getName(), env.getDynamicRoutingSlip().getCurrentRoute().getOperation(), env);
                     env.getDynamicRoutingSlip().nextRoute(); // ratchet it
                     if (!sch.send(env)) {
                         LOG.warning("MessageConsumer.receive() failed during pubsub.");
@@ -243,14 +260,17 @@ final class MessageChannel implements MessageProducer, LifeCycle {
         }
     }
 
+    @Override
     public void setFlush(boolean flush) {
         this.flush = flush;
     }
 
+    @Override
     public boolean getFlush() {
         return flush;
     }
 
+    @Override
     public boolean clearUnprocessed() {
         boolean success = true;
         File[] messages = channelDir.listFiles();
@@ -261,6 +281,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
         return success;
     }
 
+    @Override
     public boolean sendUnprocessed() {
         File[] messages = channelDir.listFiles();
         for(File jsonFile : messages) {
@@ -278,6 +299,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
         return true;
     }
 
+    @Override
     public boolean start(Properties properties) {
         config = properties;
         String baseLocation;
@@ -310,20 +332,24 @@ final class MessageChannel implements MessageProducer, LifeCycle {
         return true;
     }
 
+    @Override
     public boolean pause() {
         accepting = false;
         return true;
     }
 
+    @Override
     public boolean unpause() {
         accepting = true;
         return true;
     }
 
+    @Override
     public boolean restart() {
         return shutdown() && start(config);
     }
 
+    @Override
     public boolean shutdown() {
         accepting = false;
         long begin = new Date().getTime();
@@ -351,10 +377,6 @@ final class MessageChannel implements MessageProducer, LifeCycle {
             runningTime += waitMs;
         } while(queue.size() > 0 && runningTime < maxWaitMs);
         return true;
-    }
-
-    boolean forceShutdown() {
-        return shutdown();
     }
 
     private void waitABit(long waitTime) {
