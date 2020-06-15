@@ -164,7 +164,7 @@ public class SEDABus implements MessageBus {
         status = Status.Starting;
         setConfig(properties);
         namedChannels = new HashMap<>();
-        pool = new WorkerThreadPool(namedChannels, properties);
+        pool = new WorkerThreadPool(namedChannels, config);
         Thread d = new Thread(pool);
         d.start();
         status = Status.Running;
