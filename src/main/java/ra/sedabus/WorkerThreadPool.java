@@ -68,7 +68,7 @@ final class WorkerThreadPool extends AppThread {
         long currentWait = 0;
         LOG.info("Thread pool starting...");
         while(spin.get()) {
-            Wait.aSec(1);
+            Wait.aMs(100);
             synchronized (SEDABus.channelLock) {
                 namedChannels.forEach((k, v) -> {
 //                try {

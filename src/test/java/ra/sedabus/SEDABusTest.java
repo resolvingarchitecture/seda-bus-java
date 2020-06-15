@@ -1,9 +1,6 @@
 package ra.sedabus;
 
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.*;
 import ra.common.DLC;
 import ra.common.Envelope;
 import ra.common.MessageConsumer;
@@ -13,20 +10,20 @@ import java.util.logging.Logger;
 
 public class SEDABusTest {
 
-    private Logger LOG = Logger.getLogger(SEDABusTest.class.getName());
+    private static final Logger LOG = Logger.getLogger(SEDABusTest.class.getName());
 
-    protected SEDABus bus;
+    private static SEDABus bus;
 
-    @Before
-    public void init() {
+    @BeforeClass
+    public static void init() {
         LOG.info("Init...");
         Properties props = new Properties();
         bus = SEDABus.getInstance(props);
         bus.start(props);
     }
 
-    @After
-    public void tearDown() {
+    @AfterClass
+    public static void tearDown() {
         LOG.info("Teardown...");
     }
 
