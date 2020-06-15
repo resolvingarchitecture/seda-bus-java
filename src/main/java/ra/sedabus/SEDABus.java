@@ -22,6 +22,8 @@ public class SEDABus implements LifeCycle {
 
     private static Logger LOG = Logger.getLogger(SEDABus.class.getName());
 
+    public enum Status {Starting, Running, Paused, Stopping, Stopped, Errored}
+
     private static SEDABus instance;
 
     private static final Object instanceLock = new Object();
@@ -30,24 +32,31 @@ public class SEDABus implements LifeCycle {
     private Properties config;
     private Map<String, MessageChannel> namedChannels;
     private WorkerThreadPool pool;
-
-    private boolean running = false;
+    private Status status = Status.Stopped;
 
     private SEDABus(){}
 
+    public Status getStatus() {
+        return status;
+    }
+
     public boolean publish(Envelope envelope) {
-        Route currentRoute = envelope.getDynamicRoutingSlip().getCurrentRoute();
-        if(currentRoute==null) {
-            LOG.info("No route current in SEDA Bus. Unable to continue.");
-            return true;
+        if(status == Status.Running) {
+            Route currentRoute = envelope.getDynamicRoutingSlip().getCurrentRoute();
+            if (currentRoute == null) {
+                LOG.info("No route current in SEDA Bus. Unable to continue.");
+                return true;
+            }
+            String serviceName = currentRoute.getService();
+            MessageChannel channel = namedChannels.get(serviceName);
+            if (channel == null) {
+                LOG.warning("Unable to continue. No channel for service: " + serviceName);
+                return false;
+            }
+            return channel.send(envelope);
         }
-        String serviceName = currentRoute.getService();
-        MessageChannel channel = namedChannels.get(serviceName);
-        if(channel==null) {
-            LOG.warning("Unable to continue. No channel for service: "+serviceName);
-            return false;
-        }
-        return channel.send(envelope);
+        LOG.info("SEDABus "+status.name());
+        return false;
     }
 
     public static SEDABus getInstance(Properties properties) {
@@ -58,13 +67,15 @@ public class SEDABus implements LifeCycle {
                     instance.setConfig(properties);
                 } catch (Exception e) {
                     LOG.severe(e.getLocalizedMessage());
+                    instance.status = Status.Errored;
+                    instance = null;
                     return null;
                 }
             }
-            if(instance.running = false) {
+            if(instance.status == Status.Stopped) {
                 if(!instance.start(properties)) {
                     LOG.severe("SEDABus start failed.");
-                    instance.running = false;
+                    instance.status = Status.Errored;
                 }
             }
         }
@@ -104,7 +115,7 @@ public class SEDABus implements LifeCycle {
         return ch;
     }
 
-    public MessageChannel registerChannel(String channelName, int maxSize, boolean pubSub, ServiceLevel serviceLevel, Class dataTypeFilter) {
+    public MessageChannel registerChannel(String channelName, int maxSize, ServiceLevel serviceLevel, Class dataTypeFilter, boolean pubSub) {
         MessageChannel ch = new MessageChannel(channelName, maxSize, dataTypeFilter, serviceLevel, pubSub);
         if(!ch.start(config)) {
             LOG.warning("Channel failed to start.");
@@ -116,34 +127,62 @@ public class SEDABus implements LifeCycle {
         return ch;
     }
 
+    /**
+     * Method requires previous Message Channel created with pubSub set to true.
+     * @param channelName Name of the channel with pubSub set to true.
+     * @param subscriberChannelName Name of the subscriber channel to create.
+     * @param maxSize Max size of subscriber channel.
+     * @param serviceLevel Service Level of subscriber channel.
+     * @param dataTypeFilter Data type filter for subscriber channel.
+     * @return MessageChannel subscriber channel
+     */
+    public MessageChannel registerSubscriberChannel(String channelName, String subscriberChannelName, int maxSize, ServiceLevel serviceLevel, Class dataTypeFilter, boolean pubSub) {
+        MessageChannel sch = new MessageChannel(subscriberChannelName, maxSize, dataTypeFilter, serviceLevel, pubSub);
+        if(!sch.start(config)) {
+            LOG.warning("Channel failed to start.");
+            return null;
+        }
+        synchronized (channelLock) {
+            MessageChannel ch = namedChannels.get(channelName);
+            if(ch!=null && ch.getPubSub()) {
+                ch.registerSubscriptionChannel(sch);
+            }
+        }
+        return sch;
+    }
+
     public boolean registerAsynchConsumer(String channelName, MessageConsumer consumer) {
         MessageChannel ch = namedChannels.get(channelName);
-        ch.registerConsumer(consumer);
+        ch.registerAsyncConsumer(consumer);
         return true;
     }
 
     @Override
     public boolean start(Properties properties) {
+        status = Status.Starting;
         namedChannels = new HashMap<>();
         pool = new WorkerThreadPool(namedChannels, properties);
         Thread d = new Thread(pool);
         d.start();
+        status = Status.Running;
         return true;
     }
 
     @Override
     public boolean pause() {
-        return false;
+        status = Status.Paused;
+        return true;
     }
 
     @Override
     public boolean unpause() {
-        return false;
+        status = Status.Running;
+        return true;
     }
 
     @Override
     public boolean restart() {
-        return false;
+        return shutdown() && start(config);
     }
 
     @Override
@@ -163,12 +202,4 @@ public class SEDABus implements LifeCycle {
         return shutdown();
     }
 
-    public static void main(String[] args) {
-        String configLocation = args[0];
-        if(configLocation==null || "".equals(configLocation)) {
-            LOG.severe("config location required.");
-            System.exit(-1);
-        }
-
-    }
 }

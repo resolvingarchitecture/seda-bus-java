@@ -68,9 +68,23 @@ final class WorkerThreadPool extends AppThread {
                         while(ch.getQueue().size() > 0) {
                             pool.execute(ch::receive);
                         }
+                        if(ch.getSubscriptionChannels()!=null && ch.getSubscriptionChannels().size() > 0) {
+                            ch.getSubscriptionChannels().forEach(sch -> {
+                                while(sch.getQueue().size() > 0) {
+                                    pool.execute(sch::receive);
+                                }
+                            });
+                        }
                         ch.setFlush(false);
                     } else if (ch.getQueue().size() > 0) {
                         pool.execute(ch::receive);
+                        if(ch.getSubscriptionChannels()!=null && ch.getSubscriptionChannels().size() > 0) {
+                            ch.getSubscriptionChannels().forEach(sch -> {
+                                if(sch.getQueue().size() > 0) {
+                                    pool.execute(sch::receive);
+                                }
+                            });
+                        }
                     }
                 });
             }

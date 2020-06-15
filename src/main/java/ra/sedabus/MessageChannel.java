@@ -1,7 +1,6 @@
 package ra.sedabus;
 
 import ra.common.*;
-import ra.util.Config;
 import ra.util.FileUtil;
 import ra.util.SystemSettings;
 
@@ -75,6 +74,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
     private ServiceLevel serviceLevel = ServiceLevel.AtLeastOnce;
     private Boolean pubSub = false;
     private List<MessageConsumer> consumers;
+    private List<MessageChannel> subscriptionChannels;
     private int roundRobin = 0;
     private boolean flush = false;
 
@@ -105,8 +105,20 @@ final class MessageChannel implements MessageProducer, LifeCycle {
         return name;
     }
 
-    void registerConsumer(MessageConsumer consumer) {
+    boolean getPubSub() {
+        return pubSub;
+    }
+
+    void registerAsyncConsumer(MessageConsumer consumer) {
         consumers.add(consumer);
+    }
+
+    void registerSubscriptionChannel(MessageChannel channel) {
+        subscriptionChannels.add(channel);
+    }
+
+    List<MessageChannel> getSubscriptionChannels() {
+        return subscriptionChannels;
     }
 
     void ack(Envelope envelope) {
@@ -204,18 +216,19 @@ final class MessageChannel implements MessageProducer, LifeCycle {
     }
 
     private void process(Envelope envelope) {
-        if(envelope!=null && consumers!=null && consumers.size() > 0) {
-            if (pubSub) {
+        if(envelope!=null) {
+            if (pubSub && subscriptionChannels!=null && subscriptionChannels.size() > 0) {
                 Envelope env;
-                for (MessageConsumer c : consumers) {
+                for (MessageChannel sch : subscriptionChannels) {
                     env = Envelope.envelopeFactory(envelope);
-                    if (c.receive(env)) {
-
-                    } else {
+                    DLC.addRoute(sch.name, env.getDynamicRoutingSlip().getCurrentRoute().getOperation(), env);
+                    env.getDynamicRoutingSlip().nextRoute(); // ratchet it
+                    if (!sch.send(env)) {
                         LOG.warning("MessageConsumer.receive() failed during pubsub.");
                     }
                 }
-            } else {
+                ack(envelope);
+            } else if(consumers!=null && consumers.size() > 0) {
                 // Point-to-Point
                 if (roundRobin == consumers.size()) roundRobin = 0;
                 MessageConsumer c = consumers.get(roundRobin++);
@@ -263,6 +276,7 @@ final class MessageChannel implements MessageProducer, LifeCycle {
         }
         queue = new ArrayBlockingQueue<>(capacity);
         consumers = new ArrayList<>();
+        subscriptionChannels = new ArrayList<>();
         accepting = true;
         return true;
     }
