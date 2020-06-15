@@ -1,0 +1,26 @@
+# Created by .ignore support plugin (hsz.mobi)
+
+# Log file
+*.log
+*.log.*
+
+# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
+hs_err_pid*
+.ra
+.idea
+*.iml
+/deploy
+target
+/research
+/topics
+/build
+*.pkr
+*.skr
+/.classpath
+/.project
+/.settings/
+/src/test/resources/logs
+**/store_lock
+/src/test/resources/peerDB
+/src/test/resources/peerGraph
+
