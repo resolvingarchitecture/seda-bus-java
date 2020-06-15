@@ -23,13 +23,11 @@ final class WorkerThreadPool extends AppThread {
 
     private Status status = Status.Stopped;
 
-    private static final int NUMBER_OF_CORES = Runtime.getRuntime().availableProcessors();
-
     private ExecutorService pool;
     private Map<String,MessageChannel> namedChannels;
     private Collection<MessageChannel> channels;
-    private int poolSize = NUMBER_OF_CORES * 2; // default
-    private int maxPoolSize = NUMBER_OF_CORES * 2; // default
+    private int poolSize = 2; // default
+    private int maxPoolSize = 4; // default
     private Properties properties;
     private AtomicBoolean spin = new AtomicBoolean(true);
 
@@ -56,6 +54,31 @@ final class WorkerThreadPool extends AppThread {
 
     private boolean startPool() {
         status = Status.Starting;
+
+        if(properties.getProperty("ra.mbus.pool.min")!=null) {
+            String minProp = properties.getProperty("ra.mbus.pool.min");
+            if("Platform".equals(minProp)) {
+                poolSize = Runtime.getRuntime().availableProcessors();
+            } else {
+                try {
+                    poolSize = Integer.parseInt(minProp);
+                } catch (NumberFormatException e) {
+                    LOG.warning(e.getLocalizedMessage());
+                }
+            }
+        }
+        if(properties.getProperty("ra.mbus.pool.max")!=null) {
+            String maxProp = properties.getProperty("ra.mbus.pool.max");
+            if("Platform".equals(maxProp)) {
+                maxPoolSize = Runtime.getRuntime().availableProcessors() * 2;
+            } else {
+                try {
+                    maxPoolSize = Integer.parseInt(maxProp);
+                } catch (NumberFormatException e) {
+                    LOG.warning(e.getLocalizedMessage());
+                }
+            }
+        }
         pool = Executors.newFixedThreadPool(maxPoolSize);
         status = Status.Running;
         LOG.info("Thread pool starting...");
