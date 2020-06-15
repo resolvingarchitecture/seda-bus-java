@@ -68,6 +68,7 @@ final class WorkerThreadPool extends AppThread {
                         while(ch.getQueue().size() > 0) {
                             pool.execute(ch::receive);
                         }
+                        // TODO: Subscription Channel consumers not picking up messages
                         if(ch.getSubscriptionChannels()!=null && ch.getSubscriptionChannels().size() > 0) {
                             ch.getSubscriptionChannels().forEach(sch -> {
                                 while(sch.getQueue().size() > 0) {
