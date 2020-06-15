@@ -21,7 +21,8 @@ public class SEDABus implements LifeCycle {
 
     private static SEDABus instance;
 
-    private static Object lock = new Object();
+    private static final Object instanceLock = new Object();
+    public static final Object channelLock = new Object();
 
     private Properties config;
     private Map<String, MessageChannel> namedChannels;
@@ -47,7 +48,7 @@ public class SEDABus implements LifeCycle {
     }
 
     public static SEDABus getInstance(Properties properties) {
-        synchronized (lock) {
+        synchronized (instanceLock) {
             if (instance == null) {
                 instance = new SEDABus();
                 try {
@@ -82,7 +83,9 @@ public class SEDABus implements LifeCycle {
             LOG.warning("Channel failed to start.");
             return;
         }
-        namedChannels.put(channelName, ch);
+        synchronized (channelLock) {
+            namedChannels.put(channelName, ch);
+        }
     }
 
     public void registerChannel(String channelName, ServiceLevel serviceLevel) {
@@ -91,7 +94,9 @@ public class SEDABus implements LifeCycle {
             LOG.warning("Channel failed to start.");
             return;
         }
-        namedChannels.put(channelName, ch);
+        synchronized (channelLock) {
+            namedChannels.put(channelName, ch);
+        }
     }
 
     public void registerChannel(String channelName, int maxSize, boolean pubSub, ServiceLevel serviceLevel, Class dataTypeFilter) {
@@ -100,7 +105,9 @@ public class SEDABus implements LifeCycle {
             LOG.warning("Channel failed to start.");
             return;
         }
-        namedChannels.put(channelName, ch);
+        synchronized (channelLock) {
+            namedChannels.put(channelName, ch);
+        }
     }
 
     public boolean registerConsumer(String channelName, MessageConsumer consumer) {
@@ -113,6 +120,8 @@ public class SEDABus implements LifeCycle {
     public boolean start(Properties properties) {
         namedChannels = new HashMap<>();
         pool = new WorkerThreadPool(namedChannels, properties);
+        Thread d = new Thread(pool);
+        d.start();
         return true;
     }
 

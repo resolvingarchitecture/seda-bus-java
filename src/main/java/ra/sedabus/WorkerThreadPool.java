@@ -1,6 +1,7 @@
 package ra.sedabus;
 
 import ra.util.AppThread;
+import ra.util.Wait;
 
 import java.util.Collection;
 import java.util.Map;
@@ -52,6 +53,7 @@ final class WorkerThreadPool extends AppThread {
 
     @Override
     public void run() {
+        LOG.info("WorkerThreadPool kicked off...");
         startPool();
         status = Status.Stopped;
     }
@@ -64,8 +66,11 @@ final class WorkerThreadPool extends AppThread {
         final long printPeriodMs = 5000; // print * every 5 seconds
         final long waitPeriodMs = 500; // wait half a second
         long currentWait = 0;
+        LOG.info("Thread pool starting...");
         while(spin.get()) {
-            namedChannels.forEach((k,v) -> {
+            Wait.aSec(1);
+            synchronized (SEDABus.channelLock) {
+                namedChannels.forEach((k, v) -> {
 //                try {
 //                    if(currentWait > printPeriodMs) {
 //                        LOG.finest("*");
@@ -82,7 +87,8 @@ final class WorkerThreadPool extends AppThread {
 //                } catch (InterruptedException e) {
 //
 //                }
-            });
+                });
+            }
         }
         return true;
     }
