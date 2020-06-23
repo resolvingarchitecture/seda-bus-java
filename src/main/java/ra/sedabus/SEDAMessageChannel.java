@@ -182,6 +182,16 @@ final class SEDAMessageChannel implements MessageChannel {
     }
 
     /**
+     * Receive an Envelope and push to queue.
+     * @param envelope
+     * @return
+     */
+    @Override
+    public boolean receive(Envelope envelope) {
+        return send(envelope);
+    }
+
+    /**
      * Receive envelope from channel with blocking.
      * Process all registered async Message Consumers if present.
      * Return Envelope in case called by polling Message Consumer.
