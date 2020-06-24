@@ -1,7 +1,7 @@
 package ra.sedabus;
 
-import ra.common.MessageChannel;
 import ra.common.Status;
+import ra.common.messaging.MessageChannel;
 import ra.util.AppThread;
 import ra.util.Wait;
 
@@ -24,7 +24,7 @@ final class WorkerThreadPool extends AppThread {
     private Status status = Status.Stopped;
 
     private ExecutorService pool;
-    private Map<String,MessageChannel> namedChannels;
+    private Map<String, MessageChannel> namedChannels;
     private Collection<MessageChannel> channels;
     private int poolSize = 2; // default
     private int maxPoolSize = 4; // default

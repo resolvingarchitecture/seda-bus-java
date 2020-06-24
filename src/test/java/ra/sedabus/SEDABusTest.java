@@ -3,8 +3,7 @@ package ra.sedabus;
 import org.junit.*;
 import ra.common.DLC;
 import ra.common.Envelope;
-import ra.common.MessageConsumer;
-import ra.common.ServiceLevel;
+import ra.common.messaging.MessageConsumer;
 import ra.util.Wait;
 
 import java.util.Properties;
