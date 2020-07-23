@@ -313,7 +313,7 @@ final class SEDAMessageChannel implements MessageChannel {
             baseLocDir = new File(baseLocation);
         } else {
             try {
-                baseLocDir = SystemSettings.getUserAppDataDir(".ra", "sedabus", true);
+                baseLocDir = SystemSettings.getUserAppDataDir(".ra", this.getClass().getName(), true);
                 baseLocation = baseLocDir.getAbsolutePath();
             } catch (IOException e) {
                 LOG.severe(e.getLocalizedMessage());
