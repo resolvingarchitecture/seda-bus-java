@@ -42,12 +42,16 @@ public class SEDABus implements MessageBus {
     @Override
     public boolean publish(Envelope envelope) {
         if(status == Status.Running) {
-            Route currentRoute = envelope.getDynamicRoutingSlip().getCurrentRoute();
-            if (currentRoute == null) {
-                LOG.info("No route current in SEDA Bus. Unable to continue.");
+            String serviceName = null;
+            if (envelope.getRoute() != null) {
+                serviceName = envelope.getRoute().getService();
+            } else if (envelope.getDynamicRoutingSlip() != null && envelope.getDynamicRoutingSlip().getCurrentRoute() != null) {
+                serviceName = envelope.getDynamicRoutingSlip().getCurrentRoute().getService();
+            }
+            if(serviceName == null) {
+                LOG.warning("Unable to find a service name. Deadlettering...");
                 return true;
             }
-            String serviceName = currentRoute.getService();
             MessageChannel channel = namedChannels.get(serviceName);
             if (channel == null) {
                 LOG.warning("Unable to continue. No channel for service: " + serviceName);
