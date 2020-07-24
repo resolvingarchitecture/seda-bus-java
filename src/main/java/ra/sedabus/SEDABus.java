@@ -170,6 +170,8 @@ public class SEDABus implements MessageBus {
         if(client!=null) {
             client.reply(envelope);
         }
+        // remove Client
+        callbacks.remove(envelope.getId());
         return true;
     }
 
