@@ -215,8 +215,7 @@ final class SEDAMessageChannel implements MessageChannel {
             // No need to log
         }
         process(next);
-        if((next.getRoute()!=null && next.getRoute().getRouted()) || next.getDynamicRoutingSlip().peekAtNextRoute()==null)
-            bus.completed(next);
+        bus.completed(next);
         return next;
     }
 
@@ -236,8 +235,7 @@ final class SEDAMessageChannel implements MessageChannel {
             // No need to log
         }
         process(next);
-        if((next.getRoute()!=null && next.getRoute().getRouted()) || next.getDynamicRoutingSlip().peekAtNextRoute()==null)
-            bus.completed(next);
+        bus.completed(next);
         return next;
     }
 

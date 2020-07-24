@@ -65,6 +65,26 @@ public class SEDABus implements MessageBus {
         return false;
     }
 
+    @Override
+    public boolean completed(Envelope e) {
+        if((e.getRoute()!=null && e.getRoute().getRouted()) || (e.getDynamicRoutingSlip()!=null && e.getDynamicRoutingSlip().peekAtNextRoute()==null)) {
+            // No more routes; check for Client callback
+            Client client = callbacks.get(e.getId());
+            if (client != null) {
+                client.reply(e);
+            }
+            // remove Client
+            callbacks.remove(e.getId());
+        } else if(e.getDynamicRoutingSlip()!=null && e.getDynamicRoutingSlip().peekAtNextRoute()!=null) {
+            e.getDynamicRoutingSlip().nextRoute(); // ratchet ahead
+            MessageChannel channel = lookupChannel(e);
+            if(channel!=null) {
+                return channel.send(e);
+            }
+        }
+        return true;
+    }
+
     private MessageChannel lookupChannel(Envelope envelope) {
         String serviceName = null;
         if (envelope.getRoute() != null) {
@@ -161,17 +181,6 @@ public class SEDABus implements MessageBus {
     public boolean registerAsynchConsumer(String channelName, MessageConsumer consumer) {
         MessageChannel ch = namedChannels.get(channelName);
         ch.registerAsyncConsumer(consumer);
-        return true;
-    }
-
-    @Override
-    public boolean completed(Envelope envelope) {
-        Client client = callbacks.get(envelope.getId());
-        if(client!=null) {
-            client.reply(envelope);
-        }
-        // remove Client
-        callbacks.remove(envelope.getId());
         return true;
     }
 
