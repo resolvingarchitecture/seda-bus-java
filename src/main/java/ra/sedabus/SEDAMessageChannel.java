@@ -1,9 +1,12 @@
 package ra.sedabus;
 
+import ra.common.Client;
 import ra.common.DLC;
 import ra.common.Envelope;
+import ra.common.messaging.MessageBus;
 import ra.common.messaging.MessageChannel;
 import ra.common.messaging.MessageConsumer;
+import ra.common.route.SimpleRoute;
 import ra.common.service.ServiceLevel;
 import ra.util.FileUtil;
 import ra.util.SystemSettings;
@@ -70,6 +73,7 @@ final class SEDAMessageChannel implements MessageChannel {
     private boolean accepting = false;
     private BlockingQueue<Envelope> queue;
 
+    private MessageBus bus;
     private String name;
     private File channelDir;
     // Capacity until blocking occurs
@@ -84,16 +88,19 @@ final class SEDAMessageChannel implements MessageChannel {
 
     // Channel with Defaults - 10 capacity, no data type filter, fire and forget (in-memory only), point-to-point
     // Name must be unique if creating multiple channels otherwise storage will get stomped over if guaranteed delivery used.
-    SEDAMessageChannel(String name) {
+    SEDAMessageChannel(MessageBus bus, String name) {
+        this.bus = bus;
         this.name = name;
     }
 
-    SEDAMessageChannel(String name, ServiceLevel serviceLevel) {
+    SEDAMessageChannel(MessageBus bus, String name, ServiceLevel serviceLevel) {
+        this.bus = bus;
         this.name = name;
         this.serviceLevel = serviceLevel;
     }
 
-    SEDAMessageChannel(String name, int capacity, Class dataTypeFilter, ServiceLevel serviceLevel, Boolean pubSub) {
+    SEDAMessageChannel(MessageBus bus, String name, int capacity, Class dataTypeFilter, ServiceLevel serviceLevel, Boolean pubSub) {
+        this.bus = bus;
         this.name = name;
         this.capacity = capacity;
         this.dataTypeFilter = dataTypeFilter;
@@ -139,11 +146,11 @@ final class SEDAMessageChannel implements MessageChannel {
 
     @Override
     public void ack(Envelope envelope) {
-        LOG.info(Thread.currentThread().getName()+": Removing Envelope-"+envelope.getId()+"("+envelope+") from message queue (size="+queue.size()+")");
+        LOG.info(Thread.currentThread().getName()+": Removing Envelope.id="+envelope.getId()+" from message queue (size="+queue.size()+")");
         if(remove(envelope)) {
             queue.remove(envelope);
         }
-        LOG.info(Thread.currentThread().getName()+": Removed Envelope-"+envelope.getId()+"("+envelope+") from message queue (size="+queue.size()+")");
+        LOG.info(Thread.currentThread().getName()+": Removed Envelope.id="+envelope.getId()+" from message queue (size="+queue.size()+")");
     }
 
     /**
@@ -157,9 +164,9 @@ final class SEDAMessageChannel implements MessageChannel {
             if (serviceLevel == ServiceLevel.AtMostOnce) {
                 try {
                     if(queue.add(e))
-                        LOG.info(Thread.currentThread().getName() + ": Envelope-" + e.getId() + "(" + e + ") added to message queue (size=" + queue.size() + ")");
+                        LOG.info(Thread.currentThread().getName() + ": Envelope.id=" + e.getId() + " added to message queue (size=" + queue.size() + ")");
                 } catch (IllegalStateException ex) {
-                    String errMsg = Thread.currentThread().getName() + ": Channel at capacity; rejected Envelope-" + e.getId() + "(" + e + ").";
+                    String errMsg = Thread.currentThread().getName() + ": Channel at capacity; rejected Envelope.id=" + e.getId();
                     DLC.addErrorMessage(errMsg, e);
                     LOG.warning(errMsg);
                     return false;
@@ -168,9 +175,9 @@ final class SEDAMessageChannel implements MessageChannel {
                 // Guaranteed
                 try {
                     if(persist(e) && queue.add(e))
-                        LOG.info(Thread.currentThread().getName()+": Envelope-"+e.getId()+"("+e+") added to message queue (size="+queue.size()+")");
+                        LOG.info(Thread.currentThread().getName()+": Envelope.id="+e.getId()+" added to message queue (size="+queue.size()+")");
                 } catch (IllegalStateException ex) {
-                    String errMsg = Thread.currentThread().getName()+": Channel at capacity; rejected Envelope-"+e.getId()+"("+e+").";
+                    String errMsg = Thread.currentThread().getName()+": Channel at capacity; rejected Envelope.id="+e.getId();
                     DLC.addErrorMessage(errMsg, e);
                     LOG.warning(errMsg);
                     return false;
@@ -185,6 +192,12 @@ final class SEDAMessageChannel implements MessageChannel {
         return true;
     }
 
+    @Override
+    public boolean send(Envelope envelope, Client client) {
+        // Not supported
+        return false;
+    }
+
     /**
      * Receive envelope from channel with blocking.
      * Process all registered async Message Consumers if present.
@@ -197,11 +210,13 @@ final class SEDAMessageChannel implements MessageChannel {
         try {
             LOG.info(Thread.currentThread().getName()+": Requesting envelope from message queue, blocking...");
             next = queue.take();
-            LOG.info(Thread.currentThread().getName()+": Got Envelope-"+next.getId()+"("+next+") (queue size="+queue.size()+")");
+            LOG.info(Thread.currentThread().getName()+": Got Envelope.id="+next.getId()+" , queue.size="+queue.size());
         } catch (InterruptedException e) {
             // No need to log
         }
         process(next);
+        if((next.getRoute()!=null && next.getRoute().getRouted()) || next.getDynamicRoutingSlip().peekAtNextRoute()==null)
+            bus.completed(next);
         return next;
     }
 
@@ -221,6 +236,8 @@ final class SEDAMessageChannel implements MessageChannel {
             // No need to log
         }
         process(next);
+        if((next.getRoute()!=null && next.getRoute().getRouted()) || next.getDynamicRoutingSlip().peekAtNextRoute()==null)
+            bus.completed(next);
         return next;
     }
 
@@ -239,27 +256,47 @@ final class SEDAMessageChannel implements MessageChannel {
     }
 
     private void process(Envelope envelope) {
-        if(envelope!=null) {
-            if (pubSub && subscriptionChannels!=null && subscriptionChannels.size() > 0) {
-                Envelope env;
-                for (MessageChannel sch : subscriptionChannels) {
-                    env = Envelope.envelopeFactory(envelope);
-                    DLC.addRoute(sch.getName(), env.getDynamicRoutingSlip().getCurrentRoute().getOperation(), env);
+        if(envelope==null) {
+            LOG.warning("No Envelope provided. Unable to process.");
+            return;
+        }
+        String op = null;
+        if(envelope.getRoute()!=null && envelope.getRoute().getOperation()!=null)
+            op = envelope.getRoute().getOperation();
+        else if(envelope.getDynamicRoutingSlip()!=null && envelope.getDynamicRoutingSlip().getCurrentRoute()!=null && envelope.getDynamicRoutingSlip().getCurrentRoute().getOperation()!=null)
+            op = envelope.getDynamicRoutingSlip().getCurrentRoute().getOperation();
+        if(op==null) {
+            LOG.warning("No operation provided. Unable to process Envelope.");
+            return;
+        }
+        if (pubSub && subscriptionChannels!=null && subscriptionChannels.size() > 0) {
+            Envelope env;
+            for (MessageChannel sch : subscriptionChannels) {
+                env = Envelope.envelopeFactory(envelope);
+                if(env.getRoute() != null) {
+                    SimpleRoute sr = new SimpleRoute();
+                    sr.setService(sch.getName());
+                    sr.setOperation(op);
+                    env.setRoute(sr);
+                } else if(env.getDynamicRoutingSlip()!=null && env.getDynamicRoutingSlip().getCurrentRoute()!=null)
                     env.getDynamicRoutingSlip().nextRoute(); // ratchet it
-                    if (!sch.send(env)) {
-                        LOG.warning("MessageConsumer.receive() failed during pubsub.");
-                    }
+                else {
+                    LOG.warning("No routes to publish to subscribers.");
+                    return;
                 }
+                if (!sch.send(env)) {
+                    LOG.warning("MessageConsumer.receive() failed during pubsub.");
+                }
+            }
+            ack(envelope);
+        } else if(consumers!=null && consumers.size() > 0) {
+            // Point-to-Point
+            if (roundRobin == consumers.size()) roundRobin = 0;
+            MessageConsumer c = consumers.get(roundRobin++);
+            if (c.receive(envelope)) {
                 ack(envelope);
-            } else if(consumers!=null && consumers.size() > 0) {
-                // Point-to-Point
-                if (roundRobin == consumers.size()) roundRobin = 0;
-                MessageConsumer c = consumers.get(roundRobin++);
-                if (c.receive(envelope)) {
-                    ack(envelope);
-                } else {
-                    LOG.warning("MessageConsumer.receive() failed during point-to-point.");
-                }
+            } else {
+                LOG.warning("MessageConsumer.receive() failed during point-to-point.");
             }
         }
     }

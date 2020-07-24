@@ -1,5 +1,6 @@
 package ra.sedabus;
 
+import ra.common.Client;
 import ra.common.Envelope;
 import ra.common.Status;
 import ra.common.messaging.MessageBus;
@@ -32,6 +33,7 @@ public class SEDABus implements MessageBus {
     private Map<String, MessageChannel> namedChannels;
     private WorkerThreadPool pool;
     private Status status = Status.Stopped;
+    private Map<Integer, Client> callbacks;
 
     public SEDABus(){}
 
@@ -42,25 +44,43 @@ public class SEDABus implements MessageBus {
     @Override
     public boolean publish(Envelope envelope) {
         if(status == Status.Running) {
-            String serviceName = null;
-            if (envelope.getRoute() != null) {
-                serviceName = envelope.getRoute().getService();
-            } else if (envelope.getDynamicRoutingSlip() != null && envelope.getDynamicRoutingSlip().getCurrentRoute() != null) {
-                serviceName = envelope.getDynamicRoutingSlip().getCurrentRoute().getService();
-            }
-            if(serviceName == null) {
-                LOG.warning("Unable to find a service name. Deadlettering...");
-                return true;
-            }
-            MessageChannel channel = namedChannels.get(serviceName);
-            if (channel == null) {
-                LOG.warning("Unable to continue. No channel for service: " + serviceName);
-                return false;
-            }
-            return channel.send(envelope);
+            MessageChannel channel = lookupChannel(envelope);
+            if(channel!=null)
+                return channel.send(envelope);
         }
         LOG.info("SEDABus "+status.name());
         return false;
+    }
+
+    @Override
+    public boolean publish(Envelope envelope, Client client) {
+        if(status == Status.Running) {
+            MessageChannel channel = lookupChannel(envelope);
+            if(channel!=null) {
+                callbacks.put(envelope.getId(), client);
+                return channel.send(envelope);
+            }
+        }
+        LOG.info("SEDABus "+status.name());
+        return false;
+    }
+
+    private MessageChannel lookupChannel(Envelope envelope) {
+        String serviceName = null;
+        if (envelope.getRoute() != null) {
+            serviceName = envelope.getRoute().getService();
+        } else if (envelope.getDynamicRoutingSlip() != null && envelope.getDynamicRoutingSlip().getCurrentRoute() != null) {
+            serviceName = envelope.getDynamicRoutingSlip().getCurrentRoute().getService();
+        } else {
+            LOG.warning("Unable to find a service name. Deadlettering...");
+            return null;
+        }
+        MessageChannel channel = namedChannels.get(serviceName);
+        if (channel == null) {
+            LOG.warning("Unable to continue. No channel for service: " + serviceName);
+            return null;
+        }
+        return channel;
     }
 
     @Override
@@ -75,7 +95,7 @@ public class SEDABus implements MessageBus {
 
     @Override
     public MessageChannel registerChannel(String channelName) {
-        MessageChannel ch = new SEDAMessageChannel(channelName);
+        MessageChannel ch = new SEDAMessageChannel(this, channelName);
         if(!ch.start(config)) {
             LOG.warning("Channel failed to start.");
             return null;
@@ -88,7 +108,7 @@ public class SEDABus implements MessageBus {
 
     @Override
     public MessageChannel registerChannel(String channelName, ServiceLevel serviceLevel) {
-        MessageChannel ch = new SEDAMessageChannel(channelName, serviceLevel);
+        MessageChannel ch = new SEDAMessageChannel(this, channelName, serviceLevel);
         if(!ch.start(config)) {
             LOG.warning("Channel failed to start.");
             return null;
@@ -101,7 +121,7 @@ public class SEDABus implements MessageBus {
 
     @Override
     public MessageChannel registerChannel(String channelName, int maxSize, ServiceLevel serviceLevel, Class dataTypeFilter, boolean pubSub) {
-        MessageChannel ch = new SEDAMessageChannel(channelName, maxSize, dataTypeFilter, serviceLevel, pubSub);
+        MessageChannel ch = new SEDAMessageChannel(this, channelName, maxSize, dataTypeFilter, serviceLevel, pubSub);
         if(!ch.start(config)) {
             LOG.warning("Channel failed to start.");
             return null;
@@ -123,7 +143,7 @@ public class SEDABus implements MessageBus {
      */
     @Override
     public MessageChannel registerSubscriberChannel(String channelName, String subscriberChannelName, int maxSize, ServiceLevel serviceLevel, Class dataTypeFilter, boolean pubSub) {
-        MessageChannel sch = new SEDAMessageChannel(subscriberChannelName, maxSize, dataTypeFilter, serviceLevel, pubSub);
+        MessageChannel sch = new SEDAMessageChannel(this, subscriberChannelName, maxSize, dataTypeFilter, serviceLevel, pubSub);
         if(!sch.start(config)) {
             LOG.warning("Channel failed to start.");
             return null;
@@ -141,6 +161,15 @@ public class SEDABus implements MessageBus {
     public boolean registerAsynchConsumer(String channelName, MessageConsumer consumer) {
         MessageChannel ch = namedChannels.get(channelName);
         ch.registerAsyncConsumer(consumer);
+        return true;
+    }
+
+    @Override
+    public boolean completed(Envelope envelope) {
+        Client client = callbacks.get(envelope.getId());
+        if(client!=null) {
+            client.reply(envelope);
+        }
         return true;
     }
 
@@ -173,6 +202,7 @@ public class SEDABus implements MessageBus {
         status = Status.Starting;
         setConfig(properties);
         namedChannels = new HashMap<>();
+        callbacks = new HashMap<>();
         pool = new WorkerThreadPool(namedChannels, config);
         Thread d = new Thread(pool);
         d.start();
