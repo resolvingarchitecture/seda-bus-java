@@ -31,7 +31,7 @@ public class SEDABusTest {
 
     @Test
     public void verifyPointToPoint() {
-        final int id = 1234;
+        final String id = "1234";
         MessageConsumer consumer = new MessageConsumer() {
             @Override
             public boolean receive(Envelope envelope) {

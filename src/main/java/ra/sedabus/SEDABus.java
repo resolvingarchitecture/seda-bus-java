@@ -33,7 +33,7 @@ public class SEDABus implements MessageBus {
     private Map<String, MessageChannel> namedChannels;
     private WorkerThreadPool pool;
     private Status status = Status.Stopped;
-    private Map<Integer, Client> callbacks;
+    private Map<String, Client> callbacks;
 
     public SEDABus(){}
 
