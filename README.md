@@ -20,5 +20,5 @@ they're all just endpoints.
 
 Bringing together SEDA and Bus architectural patterns is what this component attempts.
 
-This component is implemented in [Rust](https://github.com/resolvingarchitecture/seda-bus) and [Typescript](https://github.com/resolvingarchitecture/seda-bus-ts).
+This component is also implemented in [Rust](https://github.com/resolvingarchitecture/seda-bus) and [Typescript](https://github.com/resolvingarchitecture/seda-bus-ts).
 This project was the original SEDA Bus implementation for Resolving Architecture.
