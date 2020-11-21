@@ -198,6 +198,21 @@ final class SEDAMessageChannel implements MessageChannel {
         return false;
     }
 
+    @Override
+    public boolean deadLetter(Envelope envelope) {
+        File dlFile = new File(channelDir, "deadLetter.json");
+        try {
+            if(!dlFile.exists() && !dlFile.createNewFile()) {
+                return false;
+            }
+            FileUtil.appendFile(envelope.toJSON().getBytes(), dlFile.getAbsolutePath());
+        } catch (IOException e) {
+            LOG.warning(e.getLocalizedMessage());
+            return false;
+        }
+        return true;
+    }
+
     /**
      * Receive envelope from channel with blocking.
      * Process all registered async Message Consumers if present.
