@@ -48,7 +48,7 @@ public class SEDABus implements MessageBus {
             if(channel!=null)
                 return channel.send(envelope);
         }
-        LOG.info("SEDABus "+status.name());
+        LOG.fine("SEDABus "+status.name());
         return false;
     }
 
@@ -61,7 +61,7 @@ public class SEDABus implements MessageBus {
                 return channel.send(envelope);
             }
         }
-        LOG.info("SEDABus "+status.name());
+        LOG.fine("SEDABus "+status.name());
         return false;
     }
 

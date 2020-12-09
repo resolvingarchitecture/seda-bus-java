@@ -146,11 +146,11 @@ final class SEDAMessageChannel implements MessageChannel {
 
     @Override
     public void ack(Envelope envelope) {
-        LOG.info(Thread.currentThread().getName()+": Removing Envelope.id="+envelope.getId()+" from message queue (size="+queue.size()+")");
+        LOG.fine(Thread.currentThread().getName()+": Removing Envelope.id="+envelope.getId()+" from message queue (size="+queue.size()+")");
         if(remove(envelope)) {
             queue.remove(envelope);
         }
-        LOG.info(Thread.currentThread().getName()+": Removed Envelope.id="+envelope.getId()+" from message queue (size="+queue.size()+")");
+        LOG.fine(Thread.currentThread().getName()+": Removed Envelope.id="+envelope.getId()+" from message queue (size="+queue.size()+")");
     }
 
     /**
@@ -164,7 +164,7 @@ final class SEDAMessageChannel implements MessageChannel {
             if (serviceLevel == ServiceLevel.AtMostOnce) {
                 try {
                     if(queue.add(e))
-                        LOG.info(Thread.currentThread().getName() + ": Envelope.id=" + e.getId() + " added to message queue (size=" + queue.size() + ")");
+                        LOG.fine(Thread.currentThread().getName() + ": Envelope.id=" + e.getId() + " added to message queue (size=" + queue.size() + ")");
                 } catch (IllegalStateException ex) {
                     String errMsg = Thread.currentThread().getName() + ": Channel at capacity; rejected Envelope.id=" + e.getId();
                     DLC.addErrorMessage(errMsg, e);
@@ -175,7 +175,7 @@ final class SEDAMessageChannel implements MessageChannel {
                 // Guaranteed
                 try {
                     if(persist(e) && queue.add(e))
-                        LOG.info(Thread.currentThread().getName()+": Envelope.id="+e.getId()+" added to message queue (size="+queue.size()+")");
+                        LOG.fine(Thread.currentThread().getName()+": Envelope.id="+e.getId()+" added to message queue (size="+queue.size()+")");
                 } catch (IllegalStateException ex) {
                     String errMsg = Thread.currentThread().getName()+": Channel at capacity; rejected Envelope.id="+e.getId();
                     DLC.addErrorMessage(errMsg, e);
@@ -223,9 +223,9 @@ final class SEDAMessageChannel implements MessageChannel {
     public Envelope receive() {
         Envelope next = null;
         try {
-            LOG.info(Thread.currentThread().getName()+": Requesting envelope from message queue, blocking...");
+            LOG.fine(Thread.currentThread().getName()+": Requesting envelope from message queue, blocking...");
             next = queue.take();
-            LOG.info(Thread.currentThread().getName()+": Got Envelope.id="+next.getId()+" , queue.size="+queue.size());
+            LOG.fine(Thread.currentThread().getName()+": Got Envelope.id="+next.getId()+" , queue.size="+queue.size());
         } catch (InterruptedException e) {
             // No need to log
         }

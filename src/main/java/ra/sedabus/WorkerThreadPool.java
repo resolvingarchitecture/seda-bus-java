@@ -47,7 +47,7 @@ final class WorkerThreadPool extends AppThread {
 
     @Override
     public void run() {
-        LOG.info("WorkerThreadPool kicked off...");
+        LOG.fine("WorkerThreadPool kicked off...");
         startPool();
         status = Status.Stopped;
     }
@@ -81,7 +81,7 @@ final class WorkerThreadPool extends AppThread {
         }
         pool = Executors.newFixedThreadPool(maxPoolSize);
         status = Status.Running;
-        LOG.info("Thread pool starting with "+maxPoolSize+" worker threads...");
+        LOG.fine("Thread pool starting with "+maxPoolSize+" worker threads...");
         while(spin.get()) {
             Wait.aMs(100);
             synchronized (SEDABus.channelLock) {
@@ -117,7 +117,7 @@ final class WorkerThreadPool extends AppThread {
     }
 
     boolean shutdown() {
-        LOG.info("Shutting down...");
+        LOG.fine("Shutting down...");
         status = Status.Stopping;
         spin.set(false);
         pool.shutdown();
