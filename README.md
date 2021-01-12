@@ -27,8 +27,6 @@
   <h4>
     <a href="https://resolvingarchitecture.io">Site</a>
     <span> | </span>
-    <a href="https://docs.rs/crate/seda-bus/">Docs</a>
-    <span> | </span>
     <a href="https://github.com/resolvingarchitecture/seda-bus-java/blob/master/CHANGELOG.md">Changelog</a>
   </h4>
 </div>
