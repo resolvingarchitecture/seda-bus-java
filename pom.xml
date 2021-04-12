@@ -5,7 +5,7 @@
 
     <groupId>resolvingarchitecture</groupId>
 	<artifactId>seda-bus</artifactId>
-	<version>1.0.1</version>
+	<version>1.0.3</version>
 
 	<packaging>jar</packaging>
 
@@ -44,7 +44,7 @@
 		<dependency>
 			<groupId>resolvingarchitecture</groupId>
 			<artifactId>common</artifactId>
-			<version>1.0.1</version>
+			<version>1.0.3</version>
 		</dependency>
 
 		<!-- Test -->
