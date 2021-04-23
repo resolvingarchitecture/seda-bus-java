@@ -55,8 +55,8 @@ final class WorkerThreadPool extends AppThread {
     private boolean startPool() {
         status = Status.Starting;
 
-        if(properties.getProperty("ra.mbus.pool.min")!=null) {
-            String minProp = properties.getProperty("ra.mbus.pool.min");
+        if(properties.getProperty("ra.sedabus.pool.min")!=null) {
+            String minProp = properties.getProperty("ra.sedabus.pool.min");
             if("Platform".equals(minProp)) {
                 poolSize = Runtime.getRuntime().availableProcessors();
             } else {
@@ -67,8 +67,8 @@ final class WorkerThreadPool extends AppThread {
                 }
             }
         }
-        if(properties.getProperty("ra.mbus.pool.max")!=null) {
-            String maxProp = properties.getProperty("ra.mbus.pool.max");
+        if(properties.getProperty("ra.sedabus.pool.max")!=null) {
+            String maxProp = properties.getProperty("ra.sedabus.pool.max");
             if("Platform".equals(maxProp)) {
                 maxPoolSize = Runtime.getRuntime().availableProcessors() * 2;
             } else {
