@@ -75,7 +75,7 @@ public class SEDABus implements MessageBus {
             // remove Client
             callbacks.remove(e.getId());
         } else if(e.getDynamicRoutingSlip()!=null && e.getDynamicRoutingSlip().peekAtNextRoute()!=null) {
-            e.getDynamicRoutingSlip().nextRoute(); // ratchet ahead
+            e.ratchet(); // ratchet ahead
             MessageChannel channel = lookupChannel(e);
             if(channel!=null) {
                 return channel.send(e);
