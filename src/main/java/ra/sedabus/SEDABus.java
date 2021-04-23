@@ -84,12 +84,12 @@ public class SEDABus implements MessageBus {
         return true;
     }
 
-    private MessageChannel lookupChannel(Envelope envelope) {
+    private MessageChannel lookupChannel(Envelope e) {
         String serviceName = null;
-        if (envelope.getRoute() != null) {
-            serviceName = envelope.getRoute().getService();
-        } else if (envelope.getDynamicRoutingSlip() != null && envelope.getDynamicRoutingSlip().getCurrentRoute() != null) {
-            serviceName = envelope.getDynamicRoutingSlip().getCurrentRoute().getService();
+        if (e.getRoute() != null) {
+            serviceName = e.getRoute().getService();
+        } else if (e.getDynamicRoutingSlip() != null && e.getDynamicRoutingSlip().getCurrentRoute() != null) {
+            serviceName = e.getDynamicRoutingSlip().getCurrentRoute().getService();
         } else {
             LOG.warning("Unable to find a service name. Deadlettering...");
             return null;
