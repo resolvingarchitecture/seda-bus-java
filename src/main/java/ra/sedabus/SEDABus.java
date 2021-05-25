@@ -66,7 +66,7 @@ public class SEDABus implements MessageBus {
 
     @Override
     public boolean completed(Envelope e) {
-        if((e.getRoute()!=null && e.getRoute().getRouted()) || (e.getDynamicRoutingSlip()!=null && e.getDynamicRoutingSlip().peekAtNextRoute()==null)) {
+        if((e.getRoute()!=null && e.getRoute().getRouted()) && (e.getDynamicRoutingSlip()!=null && e.getDynamicRoutingSlip().peekAtNextRoute()==null)) {
             // No more routes; check for Client callback
             Client client = callbacks.get(e.getId());
             if (client != null) {
@@ -79,7 +79,12 @@ public class SEDABus implements MessageBus {
             MessageChannel channel = lookupChannel(e);
             if(channel!=null) {
                 return channel.send(e);
+            } else {
+                LOG.warning("Channel not found.");
             }
+        } else {
+            // Assume completion
+            LOG.finer("Message completed: "+e.getId());
         }
         return true;
     }
