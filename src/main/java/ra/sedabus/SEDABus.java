@@ -7,7 +7,7 @@ import ra.common.messaging.MessageBus;
 import ra.common.messaging.MessageChannel;
 import ra.common.messaging.MessageConsumer;
 import ra.common.service.ServiceLevel;
-import ra.util.Config;
+import ra.common.Config;
 
 import java.util.HashMap;
 import java.util.Map;

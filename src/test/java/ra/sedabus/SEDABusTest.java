@@ -4,7 +4,7 @@ import org.junit.*;
 import ra.common.DLC;
 import ra.common.Envelope;
 import ra.common.messaging.MessageConsumer;
-import ra.util.Wait;
+import ra.common.Wait;
 
 import java.util.Properties;
 import java.util.logging.Logger;

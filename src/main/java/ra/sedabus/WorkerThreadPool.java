@@ -2,8 +2,8 @@ package ra.sedabus;
 
 import ra.common.Status;
 import ra.common.messaging.MessageChannel;
-import ra.util.AppThread;
-import ra.util.Wait;
+import ra.common.AppThread;
+import ra.common.Wait;
 
 import java.util.Collection;
 import java.util.Map;
