@@ -66,3 +66,7 @@ Bringing together SEDA and Bus architectural patterns is what this component att
 
 This component is also implemented in [Rust](https://github.com/resolvingarchitecture/seda-bus) and [Typescript](https://github.com/resolvingarchitecture/seda-bus-ts).
 This project was the original SEDA Bus implementation for Resolving Architecture.
+
+## Research
+
+* [Whitepaper](https://github.com/mdwelsh/mdwelsh.github.io/blob/main/papers/seda-sosp01.pdf)
