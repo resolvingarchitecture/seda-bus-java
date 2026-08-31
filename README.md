@@ -70,6 +70,7 @@ Same design, other languages:
 
 * [seda-bus](https://github.com/resolvingarchitecture/seda-bus) &mdash; Rust, zero-dependency
 * [seda-bus-python](https://github.com/resolvingarchitecture/seda-bus-python) &mdash; built to exercise free-threaded (PEP 703) CPython
+* [seda-bus-ts](https://github.com/resolvingarchitecture/seda-bus-ts) &mdash; TypeScript / Node, event-loop model
 
 ## Build
 
