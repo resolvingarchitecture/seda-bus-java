@@ -3,114 +3,125 @@ package ra.sedabus;
 import ra.common.Client;
 import ra.common.DLC;
 import ra.common.Envelope;
+import ra.common.FileUtil;
+import ra.common.SystemSettings;
 import ra.common.messaging.MessageBus;
 import ra.common.messaging.MessageChannel;
 import ra.common.messaging.MessageConsumer;
 import ra.common.route.SimpleRoute;
 import ra.common.service.ServiceLevel;
-import ra.common.FileUtil;
-import ra.common.SystemSettings;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
-import java.util.Date;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * A MessageChannel ensures two or more Message Endpoints are able to communicate.
+ * One stage of the bus: a bounded queue plus its consumers.
  *
- * When the ServiceLevel is AtMostOnce, an incoming Envelope is added to the channel's in-memory queue and control
- * is immediately returned to the calling Producer. If the machine were to crash while the Envelope was in memory
- * and hadn't yet been delivered to its destination, it would be lost if the Producer didn't maintain a copy. Attempts
- * are made to send to a Consumer. Upon sending to a Consumer, control is immediately returned without requiring an ack
- * and the Envelope is removed from memory.
+ * <p>Delivery semantics come from the {@link ServiceLevel} (the envelope's own
+ * level overrides the channel default when present):
  *
- * When the ServiceLevel is AtLeastOnce or ExactlyOnce, the channel is considered a Guaranteed Delivery Channel.
+ * <ul>
+ *   <li><b>AtMostOnce</b> &ndash; the envelope is queued in memory and control
+ *       returns to the producer immediately. If the process dies before the
+ *       envelope is delivered it is lost.</li>
+ *   <li><b>AtLeastOnce</b> &ndash; the envelope is written to the channel's
+ *       on-disk store before {@code send} returns and is not removed until a
+ *       consumer has acked it. A crash mid-delivery means the envelope is
+ *       replayed on {@link #sendUnprocessed()}, so consumers must be
+ *       idempotent.</li>
+ *   <li><b>ExactlyOnce</b> &ndash; as AtLeastOnce, plus the channel remembers
+ *       the ids it has already delivered (bounded) and skips duplicates on
+ *       replay. This makes <i>processing</i> effectively once; it is not a
+ *       distributed two-phase commit.</li>
+ * </ul>
  *
- * As a Guaranteed Delivery Channel, the channel uses a built-in data store to persist messages.
- * When the Producer publishes an Envelope, the publish operation does not complete successfully until the Envelope is safely
- * stored in the channel's data store. Subsequently, the message is not deleted from this data store until it is
- * successfully forwarded to and stored in the next data store of the Consumer. In this way, once the sender successfully sends
- * the Envelope, it is always stored on disk on at least one computer until is successfully delivered to and
- * acknowledged by a Consumer. When the service level is AtLeastOnce, the channel will continue to send to a Consumer
- * until it receives an ack stating the Consumer has persisted the Envelope in their store (or processed it).
- * When the service level is ExactlyOnce, the channel performs a two-phase commit with the Consumer to ensure the Envelope
- * is received and that it is only sent once.
+ * <p>A nacked envelope (consumer returns {@code false}) is retried up to
+ * {@code maxAttempts} times, then dead-lettered.
  *
- * When a Service Level within an Envelope is provided, it is used instead of the channel's default.
- *
- * When the dataTypeFilter is set, the channel acts as a Datatype Channel whereby incoming Envelope is ignored if not of
- * that datatype. Therefore, all of the messages on a given channel will contain the same type of data.
- * The Producer, knowing what type the data is, will need to select the appropriate channel to send it on.
- * Each Consumer, knowing what channel the data was received on, will know what its type is.
- *
- * When pubSub is set to false, Envelopes are sent point-to-point ensuring that only one Consumer consumes any given message.
- * If the channel has multiple Consumers, only one of them can successfully consume a particular Envelope.
- * If multiple Consumers try to consume a single Envelope, the channel ensures that only one of them succeeds,
- * so the Consumers do not have to coordinate with each other. The channel can still have multiple Consumers
- * to consume multiple Envelopes concurrently, but only a single Consumer consumes any one Envelope.
- *
- * When pubSub is set to true, the channel will split into multiple output channels,
- * one for each Consumer. When an Envelope is published into the channel, the channel
- * delivers a copy of the Envelope to each of the output channels. Each output channel has only one Consumer,
- * which is only allowed to consume an Envelope once. In this way, each Consumer only gets the Envelope once
- * and consumed copies disappear from their channels.
- *
- * When Consumers subscribe to the channel with pubSub set to true, an additional Channel is created for the Consumer.
- *
+ * <p>When {@code pubSub} is true the channel fans each envelope out to a copy
+ * per registered subscription channel; otherwise it is delivered point-to-point,
+ * round-robin across the channel's own consumers.
  */
 final class SEDAMessageChannel implements MessageChannel {
 
     private static final Logger LOG = Logger.getLogger(SEDAMessageChannel.class.getName());
 
-    private Properties config;
-    private boolean accepting = false;
+    private static final int DEDUP_HISTORY = 100_000;
+
+    private final MessageBus bus;
+    private final String name;
+
+    private volatile boolean accepting = false;
+    private volatile boolean flush = false;
+
+    private final int capacity;
+    private final Class dataTypeFilter;
+    private final ServiceLevel serviceLevel;
+    private final boolean pubSub;
+    private final int maxAttempts;
+
     private BlockingQueue<Envelope> queue;
-
-    private MessageBus bus;
-    private String name;
     private File channelDir;
-    // Capacity until blocking occurs
-    private int capacity = 10;
-    private Class dataTypeFilter;
-    private ServiceLevel serviceLevel = ServiceLevel.AtLeastOnce;
-    private Boolean pubSub = false;
-    private List<MessageConsumer> consumers;
-    private List<MessageChannel> subscriptionChannels;
-    private int roundRobin = 0;
-    private boolean flush = false;
 
-    // Channel with Defaults - 10 capacity, no data type filter, fire and forget (in-memory only), point-to-point
-    // Name must be unique if creating multiple channels otherwise storage will get stomped over if guaranteed delivery used.
+    private final List<MessageConsumer> consumers = new ArrayList<>();
+    private final List<MessageChannel> subscriptionChannels = new ArrayList<>();
+    private final AtomicInteger roundRobin = new AtomicInteger(0);
+    private final Map<String, Integer> attempts = new ConcurrentHashMap<>();
+
+    /** Bounded set of already-delivered ids for ExactlyOnce dedup on replay. */
+    private final Set<String> delivered = Collections.newSetFromMap(
+            Collections.synchronizedMap(new LinkedHashMap<String, Boolean>(16, 0.75f, false) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+                    return size() > DEDUP_HISTORY;
+                }
+            }));
+
     SEDAMessageChannel(MessageBus bus, String name) {
-        this.bus = bus;
-        this.name = name;
+        this(bus, name, 10, null, ServiceLevel.AtMostOnce, false, 1);
     }
 
     SEDAMessageChannel(MessageBus bus, String name, ServiceLevel serviceLevel) {
-        this.bus = bus;
-        this.name = name;
-        this.serviceLevel = serviceLevel;
+        this(bus, name, 10, null, serviceLevel, false, 1);
     }
 
-    SEDAMessageChannel(MessageBus bus, String name, int capacity, Class dataTypeFilter, ServiceLevel serviceLevel, Boolean pubSub) {
+    SEDAMessageChannel(MessageBus bus, String name, int capacity, Class dataTypeFilter,
+                       ServiceLevel serviceLevel, boolean pubSub) {
+        this(bus, name, capacity, dataTypeFilter, serviceLevel, pubSub, 3);
+    }
+
+    SEDAMessageChannel(MessageBus bus, String name, int capacity, Class dataTypeFilter,
+                       ServiceLevel serviceLevel, boolean pubSub, int maxAttempts) {
         this.bus = bus;
         this.name = name;
-        this.capacity = capacity;
+        this.capacity = Math.max(1, capacity);
         this.dataTypeFilter = dataTypeFilter;
-        this.serviceLevel = serviceLevel;
+        this.serviceLevel = serviceLevel == null ? ServiceLevel.AtMostOnce : serviceLevel;
         this.pubSub = pubSub;
+        this.maxAttempts = Math.max(1, maxAttempts);
     }
 
-    BlockingQueue<Envelope> getQueue() {
-        return queue;
+    boolean guaranteed() {
+        return serviceLevel != ServiceLevel.AtMostOnce;
     }
+
+    // -- MessageChannel --------------------------------------------------
 
     @Override
     public String getName() {
@@ -119,9 +130,7 @@ final class SEDAMessageChannel implements MessageChannel {
 
     @Override
     public int queued() {
-        if(queue!=null)
-            return queue.size();
-        return 0;
+        return queue == null ? 0 : queue.size();
     }
 
     @Override
@@ -131,12 +140,16 @@ final class SEDAMessageChannel implements MessageChannel {
 
     @Override
     public void registerAsyncConsumer(MessageConsumer consumer) {
-        consumers.add(consumer);
+        synchronized (consumers) {
+            consumers.add(consumer);
+        }
     }
 
     @Override
     public void registerSubscriptionChannel(MessageChannel channel) {
-        subscriptionChannels.add(channel);
+        synchronized (subscriptionChannels) {
+            subscriptionChannels.add(channel);
+        }
     }
 
     @Override
@@ -146,47 +159,41 @@ final class SEDAMessageChannel implements MessageChannel {
 
     @Override
     public void ack(Envelope envelope) {
-        LOG.fine(Thread.currentThread().getName()+": Removing Envelope.id="+envelope.getId()+" from message queue (size="+queue.size()+")");
-        if(remove(envelope)) {
-            queue.remove(envelope);
+        attempts.remove(envelope.getId());
+        if (guaranteed()) {
+            removePersisted(envelope);
         }
-        LOG.fine(Thread.currentThread().getName()+": Removed Envelope.id="+envelope.getId()+" from message queue (size="+queue.size()+")");
     }
 
     /**
-     * Send message on channel.
-     * @param e Envelope
+     * Queue an envelope for this stage. Honours the effective ServiceLevel and,
+     * for a datatype channel, the type filter. Returns false if the channel is
+     * paused, the type does not match, or the queue is at capacity.
      */
     @Override
     public boolean send(Envelope e) {
-        if(accepting) {
-            ServiceLevel serviceLevel = e.getServiceLevel() == null ? this.serviceLevel : e.getServiceLevel();
-            if (serviceLevel == ServiceLevel.AtMostOnce) {
-                try {
-                    if(queue.add(e))
-                        LOG.fine(Thread.currentThread().getName() + ": Envelope.id=" + e.getId() + " added to message queue (size=" + queue.size() + ")");
-                } catch (IllegalStateException ex) {
-                    String errMsg = Thread.currentThread().getName() + ": Channel at capacity; rejected Envelope.id=" + e.getId();
-                    DLC.addErrorMessage(errMsg, e);
-                    LOG.warning(errMsg);
-                    return false;
-                }
-            } else {
-                // Guaranteed
-                try {
-                    if(persist(e) && queue.add(e))
-                        LOG.fine(Thread.currentThread().getName()+": Envelope.id="+e.getId()+" added to message queue (size="+queue.size()+")");
-                } catch (IllegalStateException ex) {
-                    String errMsg = Thread.currentThread().getName()+": Channel at capacity; rejected Envelope.id="+e.getId();
-                    DLC.addErrorMessage(errMsg, e);
-                    LOG.warning(errMsg);
-                    return false;
-                }
+        if (!accepting) {
+            DLC.addErrorMessage(Thread.currentThread().getName() + ": channel " + name + " not accepting", e);
+            return false;
+        }
+        if (dataTypeFilter != null) {
+            Object content = DLC.getContent(e);
+            if (content != null && !dataTypeFilter.isAssignableFrom(content.getClass())) {
+                LOG.fine("channel " + name + " dropped envelope " + e.getId() + " (type mismatch)");
+                return false;
             }
-        } else {
-            String errMsg = Thread.currentThread().getName()+": Not accepting envelopes.";
-            DLC.addErrorMessage(errMsg, e);
-            LOG.warning(errMsg);
+        }
+        ServiceLevel level = e.getServiceLevel() == null ? serviceLevel : e.getServiceLevel();
+        if (level != ServiceLevel.AtMostOnce && !persist(e)) {
+            return false;
+        }
+        if (!queue.offer(e)) {
+            if (level != ServiceLevel.AtMostOnce) {
+                removePersisted(e);
+            }
+            String msg = Thread.currentThread().getName() + ": channel " + name + " at capacity; rejected " + e.getId();
+            DLC.addErrorMessage(msg, e);
+            LOG.warning(msg);
             return false;
         }
         return true;
@@ -194,125 +201,165 @@ final class SEDAMessageChannel implements MessageChannel {
 
     @Override
     public boolean send(Envelope envelope, Client client) {
-        // Not supported
-        return false;
+        return false; // callbacks are held by the bus, not the channel
     }
 
     @Override
     public boolean deadLetter(Envelope envelope) {
+        if (channelDir == null) {
+            return false;
+        }
         File dlFile = new File(channelDir, "deadLetter.json");
         try {
-            if(!dlFile.exists() && !dlFile.createNewFile()) {
-                return false;
-            }
-            FileUtil.appendFile(envelope.toJSON().getBytes(), dlFile.getAbsolutePath());
-        } catch (IOException e) {
-            LOG.warning(e.getLocalizedMessage());
+            FileUtil.appendFile((envelope.toJSON() + System.lineSeparator()).getBytes(), dlFile.getAbsolutePath());
+        } catch (IOException ex) {
+            LOG.warning(ex.getLocalizedMessage());
             return false;
         }
         return true;
     }
 
-    /**
-     * Receive envelope from channel with blocking.
-     * Process all registered async Message Consumers if present.
-     * Return Envelope in case called by polling Message Consumer.
-     * @return Envelope
-     */
+    /** Blocking receive + process. Used by tests / polling consumers. */
     @Override
     public Envelope receive() {
-        Envelope next = null;
         try {
-            LOG.fine(Thread.currentThread().getName()+": Requesting envelope from message queue, blocking...");
-            next = queue.take();
-            LOG.fine(Thread.currentThread().getName()+": Got Envelope.id="+next.getId()+" , queue.size="+queue.size());
-        } catch (InterruptedException e) {
-            // No need to log
+            Envelope e = queue.take();
+            process(e);
+            return e;
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return null;
         }
-        process(next);
-        bus.completed(next);
-        return next;
     }
 
-    /**
-     * Receive envelope from channel with blocking until timeout.
-     * Process all registered async Message Consumers if present.
-     * Return Envelope in case called by polling Message Consumer.
-     * @param timeout in milliseconds
-     * @return Envelope
-     */
     @Override
     public Envelope receive(int timeout) {
-        Envelope next = null;
         try {
-            next = queue.poll(timeout, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            // No need to log
+            Envelope e = queue.poll(timeout, java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (e != null) {
+                process(e);
+            }
+            return e;
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return null;
         }
-        process(next);
-        bus.completed(next);
-        return next;
     }
 
-    /**
-     * Check the channel for an Envelope returning immediately regardless
-     * if an Envelope was found or not. Returns null if no Envelope found.
-     * Process all registered async Message Consumers if present.
-     * Return Envelope in case called by polling Message Consumer.
-     * @return Envelope
-     */
+    /** Non-blocking receive + process. This is what the worker pool calls. */
     @Override
     public Envelope poll() {
-        Envelope next = queue.poll();
-        process(next);
-        return next;
+        Envelope e = queue.poll();
+        if (e != null) {
+            process(e);
+        }
+        return e;
     }
 
     private void process(Envelope envelope) {
-        if(envelope==null) {
-            LOG.warning("No Envelope provided. Unable to process.");
+        if (envelope == null) {
             return;
         }
-        String op = null;
-        if(envelope.getRoute()!=null && envelope.getRoute().getOperation()!=null)
-            op = envelope.getRoute().getOperation();
-        else if(envelope.getDynamicRoutingSlip()!=null && envelope.getDynamicRoutingSlip().getCurrentRoute()!=null && envelope.getDynamicRoutingSlip().getCurrentRoute().getOperation()!=null)
-            op = envelope.getDynamicRoutingSlip().getCurrentRoute().getOperation();
-        if(op==null) {
-            LOG.warning("No operation provided. Unable to process Envelope.");
-            return;
-        }
-        if (pubSub && subscriptionChannels!=null && subscriptionChannels.size() > 0) {
-            Envelope env;
-            for (MessageChannel sch : subscriptionChannels) {
-                env = Envelope.envelopeFactory(envelope);
-                if(env.getRoute() != null) {
-                    SimpleRoute sr = new SimpleRoute();
-                    sr.setService(sch.getName());
-                    sr.setOperation(op);
-                    env.setRoute(sr);
-                } else if(env.getDynamicRoutingSlip()!=null && env.getDynamicRoutingSlip().getCurrentRoute()!=null)
-                    env.getDynamicRoutingSlip().nextRoute(); // ratchet it
-                else {
-                    LOG.warning("No routes to publish to subscribers.");
-                    return;
-                }
-                if (!sch.send(env)) {
-                    LOG.warning("MessageConsumer.receive() failed during pubsub.");
-                }
-            }
+        String op = operationOf(envelope);
+        if (op == null) {
+            LOG.warning("channel " + name + ": envelope " + envelope.getId() + " has no operation; dead-lettering");
+            deadLetter(envelope);
             ack(envelope);
-        } else if(consumers!=null && consumers.size() > 0) {
-            // Point-to-Point
-            if (roundRobin == consumers.size()) roundRobin = 0;
-            MessageConsumer c = consumers.get(roundRobin++);
-            if (c.receive(envelope)) {
+            return;
+        }
+
+        boolean ok;
+        if (pubSub) {
+            ok = fanOut(envelope, op);
+        } else {
+            ok = deliverPointToPoint(envelope);
+        }
+
+        if (ok) {
+            markDelivered(envelope);
+            ack(envelope);
+            bus.completed(envelope);
+            return;
+        }
+
+        int n = attempts.merge(envelope.getId(), 1, Integer::sum);
+        if (n < maxAttempts) {
+            LOG.fine("channel " + name + ": retry " + n + " for " + envelope.getId());
+            if (!queue.offer(envelope)) {
+                LOG.warning("channel " + name + ": no room to retry " + envelope.getId() + "; dead-lettering");
+                deadLetter(envelope);
                 ack(envelope);
-            } else {
-                LOG.warning("MessageConsumer.receive() failed during point-to-point.");
             }
+        } else {
+            LOG.warning("channel " + name + ": " + envelope.getId() + " failed " + n + " attempts; dead-lettering");
+            deadLetter(envelope);
+            ack(envelope);
         }
     }
+
+    private boolean fanOut(Envelope envelope, String op) {
+        List<MessageChannel> subs;
+        synchronized (subscriptionChannels) {
+            subs = new ArrayList<>(subscriptionChannels);
+        }
+        if (subs.isEmpty()) {
+            LOG.warning("pubSub channel " + name + " has no subscribers; dead-lettering " + envelope.getId());
+            return false;
+        }
+        boolean all = true;
+        for (MessageChannel sch : subs) {
+            Envelope copy = Envelope.envelopeFactory(envelope);
+            SimpleRoute sr = new SimpleRoute();
+            sr.setService(sch.getName());
+            sr.setOperation(op);
+            copy.setRoute(sr);
+            // publish() (not send()) so the subscriber channel is also scheduled
+            all = bus.publish(copy) && all;
+        }
+        return all;
+    }
+
+    private boolean deliverPointToPoint(Envelope envelope) {
+        List<MessageConsumer> snapshot;
+        synchronized (consumers) {
+            snapshot = new ArrayList<>(consumers);
+        }
+        if (snapshot.isEmpty()) {
+            LOG.warning("channel " + name + " has no consumers; dead-lettering " + envelope.getId());
+            return false;
+        }
+        int idx = Math.floorMod(roundRobin.getAndIncrement(), snapshot.size());
+        try {
+            return snapshot.get(idx).receive(envelope);
+        } catch (RuntimeException re) {
+            LOG.log(Level.WARNING, "consumer on channel " + name + " threw handling " + envelope.getId(), re);
+            return false;
+        }
+    }
+
+    private void markDelivered(Envelope envelope) {
+        if (serviceLevel == ServiceLevel.ExactlyOnce
+                || envelope.getServiceLevel() == ServiceLevel.ExactlyOnce) {
+            delivered.add(envelope.getId());
+        }
+    }
+
+    private boolean alreadyDelivered(Envelope envelope) {
+        return delivered.contains(envelope.getId());
+    }
+
+    private String operationOf(Envelope e) {
+        if (e.getRoute() != null && e.getRoute().getOperation() != null) {
+            return e.getRoute().getOperation();
+        }
+        if (e.getDynamicRoutingSlip() != null
+                && e.getDynamicRoutingSlip().getCurrentRoute() != null) {
+            return e.getDynamicRoutingSlip().getCurrentRoute().getOperation();
+        }
+        return null;
+    }
+
+    // -- flush / unprocessed -------------------------------------------
 
     @Override
     public void setFlush(boolean flush) {
@@ -326,62 +373,82 @@ final class SEDAMessageChannel implements MessageChannel {
 
     @Override
     public boolean clearUnprocessed() {
-        boolean success = true;
-        File[] messages = channelDir.listFiles();
-        for(File jsonFile : messages) {
-            if(!jsonFile.delete())
-                success = false;
+        if (channelDir == null) {
+            return true;
         }
-        return success;
+        File[] files = channelDir.listFiles((d, n) -> n.endsWith(".json") && !n.equals("deadLetter.json"));
+        if (files == null) {
+            return true;
+        }
+        boolean ok = true;
+        for (File f : files) {
+            if (!f.delete()) {
+                ok = false;
+            }
+        }
+        return ok;
     }
 
     @Override
     public boolean sendUnprocessed() {
-        File[] messages = channelDir.listFiles();
-        for(File jsonFile : messages) {
+        if (channelDir == null) {
+            return true;
+        }
+        File[] files = channelDir.listFiles((d, n) -> n.endsWith(".json") && !n.equals("deadLetter.json"));
+        if (files == null || files.length == 0) {
+            return true;
+        }
+        Arrays.sort(files); // filenames are time-ordered
+        for (File f : files) {
             byte[] body;
             try {
-                body = FileUtil.readFile(jsonFile.getAbsolutePath());
-            } catch (IOException e) {
-                LOG.warning(e.getLocalizedMessage());
+                body = FileUtil.readFile(f.getAbsolutePath());
+            } catch (IOException ex) {
+                LOG.warning(ex.getLocalizedMessage());
                 continue;
             }
             Envelope e = new Envelope();
             e.fromJSON(new String(body));
+            if (alreadyDelivered(e)) {
+                LOG.fine("channel " + name + ": skipping already-delivered " + e.getId() + " on replay");
+                removePersisted(e);
+                continue;
+            }
             process(e);
         }
         return true;
     }
 
+    // -- LifeCycle ----------------------------------------------------
+
     @Override
     public boolean start(Properties properties) {
-        config = properties;
-        String baseLocation;
-        File baseLocDir;
-        if(properties.contains("ra.sedabus.channel.locationBase")) {
-            baseLocation = properties.getProperty("ra.sedabus.channel.locationBase");
-            baseLocDir = new File(baseLocation);
+        String base;
+        File baseDir;
+        if (properties != null && properties.getProperty("ra.sedabus.channel.locationBase") != null) {
+            base = properties.getProperty("ra.sedabus.channel.locationBase");
+            baseDir = new File(base);
         } else {
             try {
-                baseLocDir = SystemSettings.getUserAppDataDir(".ra", this.getClass().getName(), true);
-                baseLocation = baseLocDir.getAbsolutePath();
-            } catch (IOException e) {
-                LOG.severe(e.getLocalizedMessage());
+                baseDir = SystemSettings.getUserAppDataDir(".ra", "sedabus", true);
+                base = baseDir.getAbsolutePath();
+            } catch (IOException ex) {
+                LOG.severe(ex.getLocalizedMessage());
                 return false;
             }
         }
-        if(!baseLocDir.exists() && !baseLocDir.mkdir()) {
-            LOG.severe("Unable to start channel due to unable to create base directory: " + baseLocation);
+        if (!baseDir.exists() && !baseDir.mkdirs()) {
+            LOG.severe("channel " + name + ": cannot create " + base);
             return false;
         }
-        channelDir = new File(baseLocDir, name);
-        if(!channelDir.exists() && !channelDir.mkdir()) {
-            LOG.severe("Unable to start channel due to unable to create channel directory: " + baseLocation + "/" + name);
-            return false;
+        if (guaranteed()) {
+            channelDir = new File(baseDir, name);
+            if (!channelDir.exists() && !channelDir.mkdirs()) {
+                LOG.severe("channel " + name + ": cannot create " + channelDir);
+                return false;
+            }
         }
         queue = new ArrayBlockingQueue<>(capacity);
-        consumers = new ArrayList<>();
-        subscriptionChannels = new ArrayList<>();
         accepting = true;
         return true;
     }
@@ -400,65 +467,72 @@ final class SEDAMessageChannel implements MessageChannel {
 
     @Override
     public boolean restart() {
-        return shutdown() && start(config);
+        return shutdown() && start(null);
     }
 
     @Override
     public boolean shutdown() {
         accepting = false;
-        long begin = new Date().getTime();
-        long runningTime = begin;
-        long waitMs = 1000;
-        long maxWaitMs = 3 * 1000; // only 3 seconds
-        // Wait first to attempt to finish responses
-        do {
-            waitABit(waitMs);
-            runningTime += waitMs;
-        } while(queue.size() > 0 && runningTime < maxWaitMs);
-        return true;
+        return drainWithin(3_000L);
     }
 
     @Override
     public boolean gracefulShutdown() {
         accepting = false;
-        long begin = new Date().getTime();
-        long runningTime = begin;
-        long waitMs = 3 * 1000; // Wait longer to allow responses to complete
-        long maxWaitMs = 30 * 1000; // up to 30 seconds
-        // Wait first to attempt to finish responses
-        do {
-            waitABit(waitMs);
-            runningTime += waitMs;
-        } while(queue.size() > 0 && runningTime < maxWaitMs);
-        return true;
+        return drainWithin(30_000L);
     }
 
-    private void waitABit(long waitTime) {
-        try {
-            Thread.sleep(waitTime);
-        } catch (InterruptedException e) {}
+    private boolean drainWithin(long maxWaitMs) {
+        long deadline = System.currentTimeMillis() + maxWaitMs;
+        while (queued() > 0 && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(20L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        return queued() == 0;
     }
+
+    // -- persistence -------------------------------------------------
+
+    private static final AtomicInteger PERSIST_SEQ = new AtomicInteger(0);
 
     private boolean persist(Envelope e) {
-        File jsonFile = new File(channelDir, e.getId()+".json");
+        if (channelDir == null) {
+            return true;
+        }
+        String fileName = String.format("%019d-%08d-%s.json",
+                System.currentTimeMillis(), PERSIST_SEQ.getAndIncrement(), e.getId());
+        File target = new File(channelDir, fileName);
+        File tmp = new File(channelDir, fileName + ".tmp");
         try {
-            if(!jsonFile.exists() && !jsonFile.createNewFile()) {
-                LOG.warning("Unable to create file to persist Envelope with id="+e.getId());
+            if (!FileUtil.writeFile(e.toJSON().getBytes(), tmp.getAbsolutePath())) {
                 return false;
             }
-        } catch (IOException ioException) {
-            LOG.warning(ioException.getLocalizedMessage());
+            Files.move(tmp.toPath(), target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            return true;
+        } catch (IOException ex) {
+            LOG.warning("channel " + name + ": failed to persist " + e.getId() + ": " + ex.getLocalizedMessage());
+            tmp.delete();
             return false;
         }
-        return FileUtil.writeFile(e.toJSON().getBytes(), jsonFile.getAbsolutePath());
     }
 
-    private boolean remove(Envelope e) {
-        File jsonFile = new File(channelDir, e.getId()+".json");
-        if(jsonFile.exists() && !jsonFile.delete()) {
-            LOG.warning("Unable to delete file of Envelope with id="+e.getId());
-            return false;
+    private void removePersisted(Envelope e) {
+        if (channelDir == null) {
+            return;
         }
-        return true;
+        File[] files = channelDir.listFiles((d, n) -> n.endsWith("-" + e.getId() + ".json"));
+        if (files == null) {
+            return;
+        }
+        for (File f : files) {
+            if (f.exists() && !f.delete()) {
+                LOG.warning("channel " + name + ": could not delete " + f);
+            }
+        }
     }
 }

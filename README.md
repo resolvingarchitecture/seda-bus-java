@@ -1,72 +1,85 @@
-# SEDA Bus
 <div align="center">
-  <img src="https://resolvingarchitecture.io/images/ra.png"  />
-
-  <h1>Resolving Architecture</h1>
-
-  <p>
-    <strong>Clarity in Design</strong>
-  </p>
-
-<h2>SEDA Bus</h2>
-
-  <p>
-   Staged Event-Driven Architecture Bus - A form of message bus avoiding the high overhead of thread-based concurrency models where channels get their own inbound and outbound queues.
-  </p>
-
-  <p>
-    <a href="https://travis-ci.com/resolvingarchitecture/seda-bus-java"><img alt="build" src="https://img.shields.io/travis/resolvingarchitecture/seda-bus-java"/></a>
-    <a href="https://resolvingarchitecture.io/ks/publickey.brian@resolvingarchitecture.io.asc"><img alt="PGP" src="https://img.shields.io/keybase/pgp/objectorange"/></a>
-    <img alt="repo size" src="https://img.shields.io/github/repo-size/resolvingarchitecture/seda-bus-java"/>
-  </p>
-  <p>
-    <img alt="num lang" src="https://img.shields.io/github/languages/count/resolvingarchitecture/seda-bus-java"/>
-    <img alt="top lang" src="https://img.shields.io/github/languages/top/resolvingarchitecture/seda-bus-java"/>
-  </p>
-
-  <h4>
-    <a href="https://resolvingarchitecture.io">Site</a>
-    <span> | </span>
-    <a href="https://github.com/resolvingarchitecture/seda-bus-java/blob/master/CHANGELOG.md">Changelog</a>
-  </h4>
+  <h1>seda-bus (Java)</h1>
+  <p><strong>Resolving Architecture &mdash; Clarity in Design</strong></p>
+  <p>A small, broker-less, <strong>staged</strong> message bus.</p>
 </div>
 
-## Donate
-Request BTC address for a donation at brian@resolvingarchitecture.io.
+Work is decomposed into stages (`MessageChannel`s) connected by bounded queues.
+**One** shared worker pool drains every stage; each stage is capped at its own
+concurrency so no stage can monopolise the pool. The only dependency is
+`ra-common`.
 
-## Notes
+```java
+SEDABus bus = new SEDABus();
+bus.start(new Properties());
 
+bus.registerChannel("work", 1000, ServiceLevel.AtMostOnce, null, false, 4); // capacity, level, type filter, pubSub, concurrency
+bus.registerAsynchConsumer("work", envelope -> {
+    // ... handle it; return false to nack (retried, then dead-lettered)
+    return true;
+});
 
-## Roadmap
+Envelope e = Envelope.documentFactory();
+DLC.addRoute("work", "handle", e);
+bus.publish(e);                       // fire and forget
+bus.publish(e, reply -> { /* ... */ }); // with a completion callback
 
-*[x] 1.0.0 - Minimal Stable Useful Functionality
-*[ ] 2.0.0 - Support [dbus](https://en.wikipedia.org/wiki/D-Bus) for inter-process communications on Linux
+bus.gracefulShutdown();
+```
 
-## Summary
-Staged Event-Driven Architecture (SEDA) is an approach to software architecture that decomposes a complex,
-event-driven application into a set of stages connected by queues. It avoids the high overhead associated
-with thread-based concurrency models (i.e. locking, unlocking, and polling for locks), and decouples event
-and thread scheduling from application logic. By performing admission control on each event queue, the
-service can be well-conditioned to load, preventing resources from being over-committed when demand exceeds
-service capacity.
+## What changed in 1.3
 
-SEDA employs dynamic control to automatically tune runtime parameters (such as the scheduling parameters of
-each stage) as well as to manage load (like performing adaptive load shedding). Decomposing services into a
-set of stages also enables modularity and code reuse, as well as the development of debugging tools for
-complex event-driven applications.
+The worker pool was the bottleneck: a 100 ms scan loop that submitted **one**
+drain task per non-empty channel per tick &mdash; an effective ceiling of ~10
+messages/second/channel. It is now event-driven: publishing schedules a
+self-rescheduling drain task, gated by a per-stage concurrency permit. Also
+fixed: a `Properties.contains` (vs `containsKey`) bug that silently disabled the
+storage-location override, a round-robin race that could throw
+`IndexOutOfBounds`, `pause()` that did not actually pause, static cross-instance
+locks, and pub/sub subscriber channels that were queued but never drained.
+Retry + dead-letter and hardened (atomic-write, ordered-replay) persistence were
+added.
 
-A Bus type architectural router style is decentralized in nature such that each instance of a node can be used
-with other bus nodes, messages need to go through any specific node as in more centralized routers like
-hub-and-spoke type routers. This is accomplished by supporting publishers and consumers using their own addressing
-schemes creating their own mappings through chosen message channels, e.g. one message channel could be associated
-with a persistence type service while another with a network type service - the bus cares not which is called
-they're all just endpoints.
+## Features
 
-Bringing together SEDA and Bus architectural patterns is what this component attempts.
+| | |
+|---|---|
+| **Bounded stages** | per-channel capacity &mdash; admission control |
+| **Service levels** | `AtMostOnce` (in-memory) / `AtLeastOnce` (persisted, replayable) / `ExactlyOnce` (persisted + dedup-on-replay) |
+| **Per-stage concurrency** | how many envelopes a stage may process at once |
+| **Delivery** | point-to-point (round-robin) or pub/sub (fan-out to subscriber channels) |
+| **Datatype channels** | optional type filter per channel |
+| **Routing slips** | dynamic itinerary carried on the envelope (`ra.common` `DynamicRoutingSlip`, a LIFO stack) |
+| **Retry + dead-letter** | nacked envelopes retry up to `maxAttempts`, then `deadLetter.json` |
+| **Graceful shutdown** | pause, drain within a timeout, then stop the pool |
 
-This component is also implemented in [Rust](https://github.com/resolvingarchitecture/seda-bus) and [Typescript](https://github.com/resolvingarchitecture/seda-bus-ts).
-This project was the original SEDA Bus implementation for Resolving Architecture.
+`ExactlyOnce` here means *processing* effectively once (the channel remembers a
+bounded history of delivered ids and skips duplicates on replay). It is **not**
+a distributed two-phase commit; the earlier Javadoc claiming one was wrong.
 
-## Research
+## What this is not
 
-* [Whitepaper](https://github.com/mdwelsh/mdwelsh.github.io/blob/main/papers/seda-sosp01.pdf)
+SEDA's original design included a **controller** that watched per-stage latency
+and queue depth at runtime and re-tuned thread allocation and shed load
+automatically. That adaptive controller is not implemented &mdash; every setting
+is static configuration. It is the interesting next step (`2.0`).
+
+## Companion implementations
+
+Same design, other languages:
+
+* [seda-bus](https://github.com/resolvingarchitecture/seda-bus) &mdash; Rust, zero-dependency
+* [seda-bus-python](https://github.com/resolvingarchitecture/seda-bus-python) &mdash; built to exercise free-threaded (PEP 703) CPython
+
+## Build
+
+```sh
+mvn test        # requires ra-common 1.2.0 in the local repo
+mvn package
+```
+
+## Reference
+
+Welsh, Culler, Brewer. *SEDA: An Architecture for Well-Conditioned, Scalable
+Internet Services.* SOSP 2001.
+[[whitepaper]](https://github.com/mdwelsh/mdwelsh.github.io/blob/main/papers/seda-sosp01.pdf)

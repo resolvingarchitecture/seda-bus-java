@@ -1,140 +1,127 @@
 package ra.sedabus;
 
-import ra.common.Status;
 import ra.common.messaging.MessageChannel;
-import ra.common.AppThread;
-import ra.common.Wait;
 
-import java.util.Collection;
-import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 
 /**
- * Thread pool for WorkerThreads.
+ * The one worker pool shared by every stage.
+ *
+ * <p>There is no polling loop. When a producer publishes to a channel the bus
+ * calls {@link #schedule(MessageChannel)}; that submits a drain task <i>iff</i>
+ * the channel has work and a free concurrency permit. A drain task pulls a
+ * batch off the channel, processes it, releases its permit and re-schedules if
+ * more work remains. Each channel is capped at its configured concurrency, so
+ * no single stage can monopolise the pool.
  */
-final class WorkerThreadPool extends AppThread {
+final class WorkerThreadPool {
 
     private static final Logger LOG = Logger.getLogger(WorkerThreadPool.class.getName());
 
-    private Status status = Status.Stopped;
+    /** Envelopes one drain task handles before releasing its permit. */
+    private static final int BATCH = 64;
 
-    private ExecutorService pool;
-    private Map<String, MessageChannel> namedChannels;
-    private Collection<MessageChannel> channels;
-    private int poolSize = 2; // default
-    private int maxPoolSize = 4; // default
-    private Properties properties;
-    private AtomicBoolean spin = new AtomicBoolean(true);
+    private final ExecutorService exec;
+    private final ConcurrentHashMap<String, Semaphore> permits = new ConcurrentHashMap<>();
+    private volatile boolean running = false;
 
-    WorkerThreadPool(Map<String, MessageChannel> namedChannels, Properties properties) {
-        this.namedChannels = namedChannels;
-        this.channels = namedChannels.values();
-        this.properties = properties;
+    WorkerThreadPool(Properties config) {
+        int threads = resolveThreads(config);
+        AtomicInteger n = new AtomicInteger(0);
+        ThreadFactory tf = r -> {
+            Thread t = new Thread(r, "seda-worker-" + n.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        };
+        this.exec = Executors.newFixedThreadPool(threads, tf);
+        LOG.fine("SEDA worker pool: " + threads + " threads");
     }
 
-    WorkerThreadPool(Map<String, MessageChannel> namedChannels, int poolSize, int maxPoolSize, Properties properties) {
-        this.namedChannels = namedChannels;
-        this.channels = namedChannels.values();
-        this.poolSize = poolSize;
-        this.maxPoolSize = maxPoolSize;
-        this.properties = properties;
+    void start() {
+        running = true;
     }
 
-    @Override
-    public void run() {
-        LOG.fine("WorkerThreadPool kicked off...");
-        startPool();
-        status = Status.Stopped;
+    /** Register a stage's concurrency limit (idempotent). */
+    void register(String channel, int concurrency) {
+        permits.putIfAbsent(channel, new Semaphore(Math.max(1, concurrency)));
     }
 
-    private boolean startPool() {
-        status = Status.Starting;
-
-        if(properties.getProperty("ra.sedabus.pool.min")!=null) {
-            String minProp = properties.getProperty("ra.sedabus.pool.min");
-            if("Platform".equals(minProp)) {
-                poolSize = Runtime.getRuntime().availableProcessors();
-            } else {
-                try {
-                    poolSize = Integer.parseInt(minProp);
-                } catch (NumberFormatException e) {
-                    LOG.warning(e.getLocalizedMessage());
-                }
+    /**
+     * Ensure the channel is being drained. Safe to call from producer threads
+     * and from drain tasks; cheap when there is nothing to do.
+     */
+    void schedule(MessageChannel channel) {
+        if (!running) {
+            return;
+        }
+        Semaphore sem = permits.computeIfAbsent(channel.getName(), k -> new Semaphore(1));
+        while (channel.queued() > 0 && sem.tryAcquire()) {
+            try {
+                exec.execute(() -> drain(channel, sem));
+            } catch (RejectedExecutionException rex) {
+                sem.release();
+                return;
             }
         }
-        if(properties.getProperty("ra.sedabus.pool.max")!=null) {
-            String maxProp = properties.getProperty("ra.sedabus.pool.max");
-            if("Platform".equals(maxProp)) {
-                maxPoolSize = Runtime.getRuntime().availableProcessors() * 2;
-            } else {
-                try {
-                    maxPoolSize = Integer.parseInt(maxProp);
-                } catch (NumberFormatException e) {
-                    LOG.warning(e.getLocalizedMessage());
-                }
-            }
-        }
-        pool = Executors.newFixedThreadPool(maxPoolSize);
-        status = Status.Running;
-        LOG.fine("Thread pool starting with "+maxPoolSize+" worker threads...");
-        while(spin.get()) {
-            Wait.aMs(100);
-            synchronized (SEDABus.channelLock) {
-                namedChannels.forEach((name, ch) -> {
-                    if(ch.getFlush()) {
-                        // Flush Channel
-                        while(ch.queued() > 0) {
-                            pool.execute(ch::receive);
-                        }
-                        // TODO: Subscription Channel consumers not picking up messages
-                        if(ch.getSubscriptionChannels()!=null && ch.getSubscriptionChannels().size() > 0) {
-                            ch.getSubscriptionChannels().forEach(sch -> {
-                                while(sch.queued() > 0) {
-                                    pool.execute(sch::receive);
-                                }
-                            });
-                        }
-                        ch.setFlush(false);
-                    } else if (ch.queued() > 0) {
-                        pool.execute(ch::receive);
-                        if(ch.getSubscriptionChannels()!=null && ch.getSubscriptionChannels().size() > 0) {
-                            ch.getSubscriptionChannels().forEach(sch -> {
-                                if(sch.queued() > 0) {
-                                    pool.execute(sch::receive);
-                                }
-                            });
-                        }
-                    }
-                });
-            }
-        }
-        return true;
     }
 
-    boolean shutdown() {
-        LOG.fine("Shutting down...");
-        status = Status.Stopping;
-        spin.set(false);
-        pool.shutdown();
+    private void drain(MessageChannel channel, Semaphore sem) {
         try {
-            if (!pool.awaitTermination(2, TimeUnit.SECONDS)) {
-                // pool didn't terminate after the first try
-                pool.shutdownNow();
+            for (int i = 0; i < BATCH && running; i++) {
+                if (channel.poll() == null) {   // poll() also processes the envelope
+                    return;
+                }
             }
-        } catch (InterruptedException ex) {
-            pool.shutdownNow();
+        } catch (RuntimeException re) {
+            LOG.warning("drain error on channel " + channel.getName() + ": " + re);
+        } finally {
+            sem.release();
+            if (running) {
+                schedule(channel);
+            }
+        }
+    }
+
+    void shutdown() {
+        running = false;
+        exec.shutdown();
+        try {
+            if (!exec.awaitTermination(5, TimeUnit.SECONDS)) {
+                exec.shutdownNow();
+            }
+        } catch (InterruptedException ie) {
+            exec.shutdownNow();
             Thread.currentThread().interrupt();
         }
-        status = Status.Stopped;
-        return true;
     }
 
-    public Status getStatus() {
-        return status;
+    private static int resolveThreads(Properties config) {
+        int cores = Runtime.getRuntime().availableProcessors();
+        int threads = Math.max(2, cores);
+        if (config == null) {
+            return threads;
+        }
+        String max = config.getProperty("ra.sedabus.pool.max");
+        if (max != null) {
+            if ("Platform".equalsIgnoreCase(max)) {
+                threads = Math.max(2, cores * 2);
+            } else {
+                try {
+                    threads = Math.max(1, Integer.parseInt(max.trim()));
+                } catch (NumberFormatException nfe) {
+                    LOG.warning("bad ra.sedabus.pool.max: " + max);
+                }
+            }
+        }
+        return threads;
     }
 }

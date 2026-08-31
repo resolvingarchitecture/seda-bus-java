@@ -3,20 +3,26 @@
 	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
 	<modelVersion>4.0.0</modelVersion>
 
-    <groupId>resolvingarchitecture</groupId>
+	<groupId>resolvingarchitecture</groupId>
 	<artifactId>seda-bus</artifactId>
-	<version>1.2.0</version>
-
+	<version>1.3.0</version>
 	<packaging>jar</packaging>
 
 	<name>ra-seda-bus</name>
-	<url>https://resolvingarchitecture.io</url>
 	<description>Resolving Architecture - SEDA Bus - Java</description>
+	<url>https://resolvingarchitecture.io</url>
 	<inceptionYear>2013</inceptionYear>
+
+	<licenses>
+		<license>
+			<name>MIT</name>
+			<url>https://opensource.org/licenses/MIT</url>
+		</license>
+	</licenses>
 
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-		<java.version>1.8</java.version>
+		<maven.compiler.release>17</maven.compiler.release>
 	</properties>
 
 	<developers>
@@ -27,9 +33,9 @@
 	</developers>
 
 	<scm>
-		<connection>scm:git@github.com/resolvingarchitecture/seda-bus-java</connection>
-		<developerConnection>scm:git@github.com/resolvingarchitecture/seda-bus-java</developerConnection>
-		<url>git@github.com/resolvingarchitecture/seda-bus-java</url>
+		<connection>scm:git:https://github.com/resolvingarchitecture/seda-bus-java.git</connection>
+		<developerConnection>scm:git:git@github.com:resolvingarchitecture/seda-bus-java.git</developerConnection>
+		<url>https://github.com/resolvingarchitecture/seda-bus-java</url>
 	</scm>
 
 	<repositories>
@@ -40,65 +46,38 @@
 	</repositories>
 
 	<dependencies>
-
 		<dependency>
 			<groupId>resolvingarchitecture</groupId>
 			<artifactId>common</artifactId>
 			<version>1.2.0</version>
 		</dependency>
 
-		<!-- Test -->
 		<dependency>
 			<groupId>junit</groupId>
 			<artifactId>junit</artifactId>
-			<version>4.12</version>
+			<version>4.13.2</version>
 			<scope>test</scope>
 		</dependency>
-
 	</dependencies>
 
 	<build>
-		<finalName>${project.name}-${project.version}</finalName>
+		<finalName>${project.artifactId}-${project.version}</finalName>
 		<resources>
 			<resource>
 				<directory>src/main/resources</directory>
 				<filtering>true</filtering>
-				<includes>
-                    <include>**/*.json</include>
-					<include>**/*.xml</include>
-					<include>**/*.yml</include>
-					<include>**/*.properties</include>
-					<include>**/*.config</include>
-					<include>**/*.txt</include>
-					<include>**/*.crt</include>
-					<include>**/*.png</include>
-					<include>**/*.fxml</include>
-					<include>**/*.css</include>
-					<include>**/*.ttf</include>
-					<include>**/*.otf</include>
-				</includes>
 			</resource>
 		</resources>
-<!--		<pluginManagement>-->
-<!--			<plugins>-->
-<!--				<plugin>-->
-<!--					<groupId>org.apache.maven.plugins</groupId>-->
-<!--					<artifactId>maven-compiler-plugin</artifactId>-->
-<!--					<version>3.8.0</version>-->
-<!--                    <configuration>-->
-<!--                        <release>8</release>-->
-<!--                    </configuration>-->
-<!--				</plugin>-->
-<!--			</plugins>-->
-<!--		</pluginManagement>-->
 		<plugins>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-compiler-plugin</artifactId>
-				<configuration>
-					<source>${java.version}</source>
-					<target>${java.version}</target>
-				</configuration>
+				<version>3.13.0</version>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<version>3.2.5</version>
 			</plugin>
 		</plugins>
 	</build>

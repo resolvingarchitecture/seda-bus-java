@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      # ra-common is not on Maven Central; build it from source first.
+      - name: build ra-common
+        run: |
+          git clone --depth 1 https://github.com/resolvingarchitecture/ra-common-java.git /tmp/ra-common
+          mvn -q -f /tmp/ra-common/pom.xml -DskipTests install
+      - run: mvn -q -B test
