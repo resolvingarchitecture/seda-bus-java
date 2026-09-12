@@ -170,6 +170,17 @@ public class SEDABus implements MessageBus {
         return register(new SEDAMessageChannel(this, channelName, maxSize, dataTypeFilter, serviceLevel, pubSub), concurrency);
     }
 
+    /**
+     * Register a stage with an explicit concurrency limit and back-pressure
+     * policy (default {@link Backpressure#Reject} everywhere else in this
+     * class, matching every previous release's only behaviour).
+     */
+    public MessageChannel registerChannel(String channelName, int maxSize, ServiceLevel serviceLevel,
+                                          Class dataTypeFilter, boolean pubSub, int concurrency,
+                                          Backpressure backpressure) {
+        return register(new SEDAMessageChannel(this, channelName, maxSize, dataTypeFilter, serviceLevel, pubSub, 3, backpressure), concurrency);
+    }
+
     @Override
     public MessageChannel registerSubscriberChannel(String channelName, String subscriberChannelName, int maxSize,
                                                     ServiceLevel serviceLevel, Class dataTypeFilter, boolean pubSub) {

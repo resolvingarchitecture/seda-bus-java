@@ -75,6 +75,7 @@ final class SEDAMessageChannel implements MessageChannel {
     private final ServiceLevel serviceLevel;
     private final boolean pubSub;
     private final int maxAttempts;
+    private final Backpressure backpressure;
 
     private BlockingQueue<Envelope> queue;
     private File channelDir;
@@ -108,6 +109,11 @@ final class SEDAMessageChannel implements MessageChannel {
 
     SEDAMessageChannel(MessageBus bus, String name, int capacity, Class dataTypeFilter,
                        ServiceLevel serviceLevel, boolean pubSub, int maxAttempts) {
+        this(bus, name, capacity, dataTypeFilter, serviceLevel, pubSub, maxAttempts, Backpressure.Reject);
+    }
+
+    SEDAMessageChannel(MessageBus bus, String name, int capacity, Class dataTypeFilter,
+                       ServiceLevel serviceLevel, boolean pubSub, int maxAttempts, Backpressure backpressure) {
         this.bus = bus;
         this.name = name;
         this.capacity = Math.max(1, capacity);
@@ -115,6 +121,7 @@ final class SEDAMessageChannel implements MessageChannel {
         this.serviceLevel = serviceLevel == null ? ServiceLevel.AtMostOnce : serviceLevel;
         this.pubSub = pubSub;
         this.maxAttempts = Math.max(1, maxAttempts);
+        this.backpressure = backpressure == null ? Backpressure.Reject : backpressure;
     }
 
     boolean guaranteed() {
@@ -187,7 +194,7 @@ final class SEDAMessageChannel implements MessageChannel {
         if (level != ServiceLevel.AtMostOnce && !persist(e)) {
             return false;
         }
-        if (!queue.offer(e)) {
+        if (!admit(e)) {
             if (level != ServiceLevel.AtMostOnce) {
                 removePersisted(e);
             }
@@ -197,6 +204,35 @@ final class SEDAMessageChannel implements MessageChannel {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Admit an envelope to {@link #queue} per {@link #backpressure}.
+     * {@code queue.offer(e)} alone - the only behaviour this channel had
+     * before - is exactly {@link Backpressure#Reject}, kept as the default
+     * for every existing constructor so nothing already depending on
+     * reject-on-full behaviour changes.
+     */
+    private boolean admit(Envelope e) {
+        switch (backpressure) {
+            case DropOldest:
+                while (!queue.offer(e)) {
+                    queue.poll(); // evict oldest to make room; null is a benign race (already drained)
+                }
+                return true;
+            case Block:
+                try {
+                    queue.put(e);
+                    return true;
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            case Reject:
+            case DropNewest:
+            default:
+                return queue.offer(e);
+        }
     }
 
     @Override

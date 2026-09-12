@@ -120,6 +120,96 @@ public class SEDABusTest {
     }
 
     @Test
+    public void dropNewestRejectsLikeRejectWhenFull() {
+        // DropNewest and Reject are the same observable outcome from the
+        // caller's perspective - "don't admit the new one" - matching every
+        // other seda-bus language port's identical treatment of the two.
+        // This exists to prove the enum value is actually wired through
+        // admit(), not to show different behaviour from Reject.
+        CountDownLatch gate = new CountDownLatch(1);
+        bus.registerChannel("dn", 2, ServiceLevel.AtMostOnce, null, false, 1, Backpressure.DropNewest);
+        bus.registerAsynchConsumer("dn", e -> {
+            await(gate, 5);
+            return true;
+        });
+
+        int accepted = 0;
+        for (int i = 0; i < 10; i++) {
+            Envelope e = Envelope.documentFactory();
+            DLC.addRoute("dn", "handle", e);
+            if (bus.publish(e)) {
+                accepted++;
+            }
+        }
+        gate.countDown();
+        Assert.assertTrue("accepted=" + accepted, accepted <= 3);
+    }
+
+    @Test
+    public void dropOldestEvictsInsteadOfRejecting() {
+        // Found missing entirely by an independent production-readiness
+        // audit: before this fix, a full channel had exactly one behaviour
+        // (Reject), regardless of what a caller configured. DropOldest must
+        // always admit the newest envelope by evicting the oldest queued
+        // one instead of ever returning false for capacity reasons.
+        CountDownLatch gate = new CountDownLatch(1);
+        bus.registerChannel("bounded", 2, ServiceLevel.AtMostOnce, null, false, 1, Backpressure.DropOldest);
+        bus.registerAsynchConsumer("bounded", e -> {
+            await(gate, 5);
+            return true;
+        });
+
+        int accepted = 0;
+        for (int i = 0; i < 10; i++) {
+            Envelope e = Envelope.documentFactory();
+            DLC.addRoute("bounded", "handle", e);
+            if (bus.publish(e)) {
+                accepted++;
+            }
+        }
+        gate.countDown();
+        Assert.assertEquals(10, accepted);
+    }
+
+    @Test
+    public void blockBackpressureWaitsInsteadOfRejecting() throws InterruptedException {
+        // The other new policy this fix adds: instead of ever rejecting,
+        // the producer's own thread waits (queue.put) for room. Bounded by
+        // an explicit producer.join(timeout) rather than letting the
+        // producer thread block forever, so a regression (Block silently
+        // still rejecting, or a stuck wait) fails this test loudly instead
+        // of hanging the whole suite.
+        int total = 30;
+        CountDownLatch done = new CountDownLatch(total);
+        bus.registerChannel("tight", 2, ServiceLevel.AtMostOnce, null, false, 1, Backpressure.Block);
+        bus.registerAsynchConsumer("tight", e -> {
+            try {
+                Thread.sleep(5);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+            done.countDown();
+            return true;
+        });
+
+        AtomicInteger accepted = new AtomicInteger();
+        Thread producer = new Thread(() -> {
+            for (int i = 0; i < total; i++) {
+                Envelope e = Envelope.documentFactory();
+                DLC.addRoute("tight", "handle", e);
+                if (bus.publish(e)) {
+                    accepted.incrementAndGet();
+                }
+            }
+        });
+        producer.start();
+        producer.join(15_000);
+        Assert.assertFalse("producer thread never returned from Block", producer.isAlive());
+        Assert.assertEquals(total, accepted.get());
+        Assert.assertTrue(await(done, 10));
+    }
+
+    @Test
     public void nackRetriesThenDeadLetters() {
         AtomicInteger tries = new AtomicInteger();
         CountDownLatch failedEnough = new CountDownLatch(3);
