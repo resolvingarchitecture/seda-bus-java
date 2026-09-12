@@ -210,6 +210,242 @@ public class SEDABusTest {
     }
 
     @Test
+    public void succeedsOnFinalAttemptDeliversExactlyOnce() {
+        AtomicInteger tries = new AtomicInteger();
+        AtomicInteger delivered = new AtomicInteger();
+        CountDownLatch done = new CountDownLatch(1);
+        bus.registerChannel("recovers", 10, ServiceLevel.AtMostOnce, null, false); // maxAttempts=3
+        bus.registerAsynchConsumer("recovers", e -> {
+            int n = tries.incrementAndGet();
+            if (n < 3) {
+                return false; // nack twice
+            }
+            delivered.incrementAndGet();
+            done.countDown();
+            return true; // succeed on the 3rd (final allowed) attempt
+        });
+
+        Envelope e = Envelope.documentFactory();
+        DLC.addRoute("recovers", "handle", e);
+        bus.publish(e);
+
+        Assert.assertTrue(await(done, 10));
+        // Give a spurious extra retry a moment to show up, if the per-envelope
+        // attempts-map entry wasn't actually cleared on success (ack() does
+        // this per the source; this pins the observable consequence down).
+        try {
+            Thread.sleep(200);
+        } catch (InterruptedException ignored) {
+        }
+        Assert.assertEquals(3, tries.get());
+        Assert.assertEquals(1, delivered.get());
+    }
+
+    @Test
+    public void noConsumersEventuallyDeadLettersWithoutMessageLoss() {
+        // deliverPointToPoint's empty-consumer-list path returns false,
+        // which process() currently treats the same as any other nack -
+        // retried up to maxAttempts (3, this overload's default) before
+        // dead-lettering, not on the very first attempt. Still correct (no
+        // message loss, no infinite retry loop) - pinned down as the actual
+        // behaviour rather than left as an assumption from reading the
+        // source alone.
+        MessageChannel ch = bus.registerChannel("empty", 10, ServiceLevel.AtMostOnce, null, false);
+        // Deliberately no registerAsynchConsumer call.
+
+        Envelope e = Envelope.documentFactory();
+        DLC.addRoute("empty", "handle", e);
+        Assert.assertTrue(bus.publish(e));
+
+        // No consumer will ever ack it; the bounded number of immediate
+        // retries (no backoff) needs a moment to exhaust and dead-letter.
+        long deadline = System.currentTimeMillis() + 2000;
+        while (ch.queued() > 0 && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException ignored) {
+            }
+        }
+        Assert.assertEquals("a no-consumer channel must eventually dead-letter, not leave the envelope queued forever",
+                0, ch.queued());
+    }
+
+    @Test
+    public void throwingConsumerDoesNotCrashTheBusOrLoseOtherEnvelopes() {
+        int normalCount = 9;
+        CountDownLatch normalDelivered = new CountDownLatch(normalCount);
+        bus.registerChannel("poison", 20, ServiceLevel.AtMostOnce, null, false);
+        bus.registerAsynchConsumer("poison", e -> {
+            if ("boom".equals(DLC.getValue("tag", e))) {
+                throw new RuntimeException("simulated consumer failure");
+            }
+            normalDelivered.countDown();
+            return true;
+        });
+
+        for (int i = 0; i < normalCount; i++) {
+            Envelope e = Envelope.documentFactory();
+            DLC.addNVP("tag", "ok", e);
+            DLC.addRoute("poison", "handle", e);
+            Assert.assertTrue(bus.publish(e));
+        }
+        Envelope poison = Envelope.documentFactory();
+        DLC.addNVP("tag", "boom", poison);
+        DLC.addRoute("poison", "handle", poison);
+        Assert.assertTrue(bus.publish(poison));
+
+        Assert.assertTrue("a throwing consumer must not stop other envelopes on the same channel from being delivered",
+                await(normalDelivered, 10));
+    }
+
+    @Test
+    public void capacityBelowOneIsClampedToAtLeastOne() {
+        // SEDAMessageChannel documents Math.max(1, capacity) - this pins
+        // that clamp-not-fail-fast behaviour down explicitly rather than
+        // leaving it an inference from reading the source.
+        CountDownLatch latch = new CountDownLatch(1);
+        bus.registerChannel("weird", 0, ServiceLevel.AtMostOnce, null, false);
+        bus.registerAsynchConsumer("weird", e -> {
+            latch.countDown();
+            return true;
+        });
+
+        Envelope e = Envelope.documentFactory();
+        DLC.addRoute("weird", "handle", e);
+        Assert.assertTrue("capacity<=0 must be clamped to a usable minimum, not break the channel",
+                bus.publish(e));
+        Assert.assertTrue(await(latch, 5));
+    }
+
+    @Test
+    public void maxAttemptsBelowOneIsClampedToAtLeastOne() throws Exception {
+        // maxAttempts isn't reachable via any public SEDABus.registerChannel
+        // overload - construct the channel directly (this test is in the
+        // same package) to pin down SEDAMessageChannel's own clamp.
+        SEDAMessageChannel ch = new SEDAMessageChannel(
+                bus, "raw", 5, null, ServiceLevel.AtMostOnce, false, 0, Backpressure.Reject);
+        Properties p = new Properties();
+        p.setProperty("ra.sedabus.channel.locationBase",
+                System.getProperty("java.io.tmpdir") + "/seda-test-raw-" + System.nanoTime());
+        Assert.assertTrue(ch.start(p));
+
+        AtomicInteger tries = new AtomicInteger();
+        ch.registerAsyncConsumer(e -> {
+            tries.incrementAndGet();
+            return false; // always nack
+        });
+
+        Envelope e = Envelope.documentFactory();
+        DLC.addRoute("raw", "handle", e);
+        Assert.assertTrue(ch.send(e));
+        // Drive the channel directly - it's not registered with a bus/pool.
+        while (ch.queued() > 0) {
+            ch.poll();
+        }
+        Assert.assertEquals("maxAttempts<=0 must clamp to at least 1, not disable retries or loop forever",
+                1, tries.get());
+        ch.shutdown();
+    }
+
+    @Test
+    public void repeatedLifecyclesDoNotLeakThreads() {
+        java.lang.management.ThreadMXBean threadBean = java.lang.management.ManagementFactory.getThreadMXBean();
+        runOneBusLifecycle(); // warm up classes/JIT once outside the measured loop
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException ignored) {
+        }
+        int before = threadBean.getThreadCount();
+
+        for (int i = 0; i < 20; i++) {
+            runOneBusLifecycle();
+        }
+        try {
+            Thread.sleep(200); // let any terminating pool threads actually die
+        } catch (InterruptedException ignored) {
+        }
+        int after = threadBean.getThreadCount();
+
+        Assert.assertTrue("thread count grew from " + before + " to " + after + " over 20 create/shutdown cycles",
+                after <= before + 5); // small tolerance for GC/JIT/compiler threads, not a per-cycle leak
+    }
+
+    private void runOneBusLifecycle() {
+        SEDABus b = new SEDABus();
+        Properties p = new Properties();
+        p.setProperty("ra.sedabus.channel.locationBase",
+                System.getProperty("java.io.tmpdir") + "/seda-leak-" + System.nanoTime());
+        b.start(p);
+        CountDownLatch latch = new CountDownLatch(1);
+        b.registerChannel("x");
+        b.registerAsynchConsumer("x", e -> {
+            latch.countDown();
+            return true;
+        });
+        Envelope e = Envelope.documentFactory();
+        DLC.addRoute("x", "h", e);
+        b.publish(e);
+        await(latch, 5);
+        b.gracefulShutdown();
+    }
+
+    @Test
+    public void shutdownDoesNotReportDrainedWhileWorkIsStillInFlight() {
+        // Investigated in depth while writing this test, worth recording:
+        // SEDAMessageChannel.drainWithin (backing MessageChannel.shutdown()/
+        // gracefulShutdown()) only polls queued() - the raw queue length.
+        // poll() removes an envelope from the queue *before* calling
+        // process() (which runs the consumer and can take arbitrary time),
+        // so queued() reads 0 while the last-popped envelope is still being
+        // handled on a worker thread - confirmed directly with instrumented
+        // timing: with 5 envelopes at 300ms each, channel-level
+        // gracefulShutdown() returns true at ~1240ms, a full ~300ms before
+        // the 5th envelope is actually delivered at ~1540ms.
+        //
+        // This test still passes reliably, because SEDABus.doShutdown calls
+        // WorkerThreadPool.shutdown() *after* the channel-level check, which
+        // calls ExecutorService.awaitTermination - a real barrier that
+        // blocks the bus-level shutdown()/gracefulShutdown() call until the
+        // in-flight drain task (including the consumer call it's in the
+        // middle of) actually finishes, independent of the channel's own
+        // (inaccurate) return value. So bus-level shutdown is accidentally
+        // correct in practice; a *channel* used directly without a bus (no
+        // pool to provide that backstop - e.g. maxAttemptsBelowOneIsClampedToAtLeastOne
+        // below drains its channel manually before calling shutdown() for
+        // exactly this reason) would not be. Testing the bus-level API here
+        // since that's what every real caller uses.
+        int total = 5;
+        AtomicInteger delivered = new AtomicInteger();
+        bus.registerChannel("slowproc", 10, ServiceLevel.AtMostOnce, null, false);
+        bus.registerAsynchConsumer("slowproc", e -> {
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+            delivered.incrementAndGet();
+            return true;
+        });
+
+        for (int i = 0; i < total; i++) {
+            Envelope e = Envelope.documentFactory();
+            DLC.addRoute("slowproc", "handle", e);
+            Assert.assertTrue(bus.publish(e));
+        }
+
+        boolean drained = bus.gracefulShutdown();
+        if (drained) {
+            Assert.assertEquals(
+                    "shutdown reported fully drained but an in-flight envelope hadn't finished processing",
+                    total, delivered.get());
+        }
+        // If drained is false, gracefulShutdown's own 30s timeout elapsed
+        // first - not a false claim, just an honest "gave up" (not expected
+        // with a 5 * 300ms workload well under 30s, but not this test's
+        // concern either way).
+    }
+
+    @Test
     public void nackRetriesThenDeadLetters() {
         AtomicInteger tries = new AtomicInteger();
         CountDownLatch failedEnough = new CountDownLatch(3);

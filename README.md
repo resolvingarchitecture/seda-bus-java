@@ -64,6 +64,32 @@ and queue depth at runtime and re-tuned thread allocation and shed load
 automatically. That adaptive controller is not implemented &mdash; every setting
 is static configuration. It is the interesting next step (`2.0`).
 
+## Correctness suite coverage
+
+Per `../CORRECTNESS_SUITE.md` (the language-agnostic spec every `seda-bus-*`
+port verifies against). All tests below live in `SEDABusTest.java`.
+
+| # | Property | Test(s) |
+|---|---|---|
+| C1 | Backpressure: Reject | `rejectsWhenChannelAtCapacity` |
+| C1 | Backpressure: DropNewest | `dropNewestRejectsLikeRejectWhenFull` |
+| C1 | Backpressure: DropOldest | `dropOldestEvictsInsteadOfRejecting` |
+| C1 | Backpressure: Block | `blockBackpressureWaitsInsteadOfRejecting` |
+| C2 | Succeeds on final attempt, delivered exactly once | `succeedsOnFinalAttemptDeliversExactlyOnce` |
+| C2 | Exhausts attempts, dead-lettered | `nackRetriesThenDeadLetters` |
+| C2 | No consumers eventually dead-letters (not silently discarded) | `noConsumersEventuallyDeadLettersWithoutMessageLoss` |
+| C3 | Throwing consumer doesn't crash the bus or lose other envelopes | `throwingConsumerDoesNotCrashTheBusOrLoseOtherEnvelopes` |
+| C4 | Shutdown accounting (bus-level; see the test's own comment for a real subtlety found while writing it) | `shutdownDoesNotReportDrainedWhileWorkIsStillInFlight` |
+| C5 | Invalid capacity is clamped, not silently broken | `capacityBelowOneIsClampedToAtLeastOne` |
+| C5 | Invalid maxAttempts is clamped, not silently broken | `maxAttemptsBelowOneIsClampedToAtLeastOne` |
+| C6 | No thread leak across repeated create/shutdown cycles | `repeatedLifecyclesDoNotLeakThreads` |
+| C7 | Concurrent producers deliver exactly once | `manyProducersDeliverEverything` |
+
+**Known issue, not part of this suite:** `deliversPointToPoint` is flaky
+under repeated back-to-back runs (bursts 20 ungated publishes against the
+default capacity of 10); pre-existing, unrelated to backpressure/correctness
+work, not yet fixed.
+
 ## Companion implementations
 
 Same design, other languages:
