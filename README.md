@@ -66,7 +66,7 @@ is static configuration. It is the interesting next step (`2.0`).
 
 ## Correctness suite coverage
 
-Per `../CORRECTNESS_SUITE.md` (the language-agnostic spec every `seda-bus-*`
+Per `../seda-bus-design/CORRECTNESS_SUITE.md` (the language-agnostic spec every `seda-bus-*`
 port verifies against). All tests below live in `SEDABusTest.java`.
 
 | # | Property | Test(s) |
