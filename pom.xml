@@ -10,7 +10,7 @@
 
 	<name>ra-seda-bus</name>
 	<description>Resolving Architecture - SEDA Bus - Java</description>
-	<url>https://resolvingarchitecture.io</url>
+	<url>https://resolvingarchitecture.dev</url>
 	<inceptionYear>2013</inceptionYear>
 
 	<licenses>
@@ -31,7 +31,7 @@
 	<developers>
 		<developer>
 			<name>Brian Taylor</name>
-			<email>brian@resolvingarchitecture.io</email>
+			<email>brian@resolvingarchitecture.dev</email>
 		</developer>
 	</developers>
 
