@@ -43,3 +43,15 @@ The headline missing piece of the SEDA design.
 - [ ] A couple of the capacity / retry / dead-letter tests are timing-sensitive and
       flake under load (pass reliably in isolation). Make them deterministic
       (inject a clock / use latches instead of sleeps).
+
+### From the Meridian review
+
+Source: `meridian/2026-11-17-review_full-v1.3.1-e06ac383.md` (testability high, observability medium).
+
+- [ ] Crash and fault-injection tests for persist-before-enqueue and ordered replay: a kill during the write, a partial
+      file, and a duplicate replay.
+- [ ] Concurrency stress tests for the lock-free publish and drain path.
+- [ ] A cross-port conformance suite (shared test vectors for the routing slip, delivery levels, retry, and dead-letter)
+      so the seven ports stay in lockstep.
+- [ ] Logging through `System.Logger` (keeps the single dependency), an envelope-id correlation across routing-slip
+      hops, and a channel statistics snapshot for hosts. The metrics hooks above cover the export side.
