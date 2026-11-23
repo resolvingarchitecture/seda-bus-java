@@ -46,7 +46,7 @@ The headline missing piece of the SEDA design.
 
 ### From the Meridian review
 
-Source: `meridian/2026-11-17-review_full-v1.3.1-e06ac383.md` (testability high, observability medium).
+Source: `reviews/2026-11-17T04-21-41Z-review_full-v1.3.1.md` (testability high, observability medium).
 
 - [ ] Crash and fault-injection tests for persist-before-enqueue and ordered replay: a kill during the write, a partial
       file, and a duplicate replay.
