@@ -93,14 +93,21 @@ final class SEDAMessageChannel implements MessageChannel {
     /** Envelopes this stage has handled but could not yet hand to the next stage. */
     private final java.util.Set<String> awaitingForward = ConcurrentHashMap.newKeySet();
 
-    /** Bounded set of already-delivered ids for ExactlyOnce dedup on replay. */
-    private final Set<String> delivered = Collections.newSetFromMap(
-            Collections.synchronizedMap(new LinkedHashMap<String, Boolean>(16, 0.75f, false) {
+    /**
+     * Bounded history of already-delivered ids for ExactlyOnce dedup on replay, oldest first. On a channel with a store
+     * directory it is also kept in {@code delivered.log}, so it survives a restart.
+     */
+    private final Map<String, Boolean> deliveredIds = Collections.synchronizedMap(
+            new LinkedHashMap<String, Boolean>(16, 0.75f, false) {
                 @Override
                 protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
                     return size() > DEDUP_HISTORY;
                 }
-            }));
+            });
+    private final Set<String> delivered = Collections.newSetFromMap(deliveredIds);
+    /** Lines in delivered.log; when it holds twice the history it is rewritten with the most recent ids. */
+    private final java.util.concurrent.atomic.AtomicInteger deliveredLogLines = new java.util.concurrent.atomic.AtomicInteger();
+    private static final String DELIVERED_LOG = "delivered.log";
 
     SEDAMessageChannel(MessageBus bus, String name) {
         this(bus, name, 10, null, ServiceLevel.AtMostOnce, false, 1);
@@ -445,6 +452,80 @@ final class SEDAMessageChannel implements MessageChannel {
         if (serviceLevel == ServiceLevel.ExactlyOnce
                 || envelope.getServiceLevel() == ServiceLevel.ExactlyOnce) {
             delivered.add(envelope.getId());
+            appendDelivered(envelope.getId());
+        }
+    }
+
+    /**
+     * Records a delivered id in {@code delivered.log}, synchronously, before the persisted envelope is deleted: a crash
+     * after this line and before the delete replays the envelope, which is then skipped. Without a store directory
+     * (the channel is AtMostOnce) the history is in memory only. A write that fails is logged, and the in-memory
+     * history still applies until the next restart.
+     */
+    private void appendDelivered(String id) {
+        if (channelDir == null) {
+            return;
+        }
+        try {
+            Files.write(new File(channelDir, DELIVERED_LOG).toPath(), (id + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND,
+                    java.nio.file.StandardOpenOption.SYNC);
+            if (deliveredLogLines.incrementAndGet() > 2 * DEDUP_HISTORY) {
+                compactDeliveredLog(DEDUP_HISTORY);
+            }
+        } catch (IOException ex) {
+            LOG.warning("channel " + name + ": could not record " + id + " as delivered on disk: " + ex.getLocalizedMessage());
+        }
+    }
+
+    /** Rewrites {@code delivered.log} with the most recent {@code keep} ids (temp file, then atomic move). */
+    synchronized void compactDeliveredLog(int keep) {
+        if (channelDir == null) {
+            return;
+        }
+        List<String> recent;
+        synchronized (deliveredIds) {
+            recent = new ArrayList<>(deliveredIds.keySet());
+        }
+        if (recent.size() > keep) {
+            recent = recent.subList(recent.size() - keep, recent.size());
+        }
+        File target = new File(channelDir, DELIVERED_LOG);
+        File tmp = new File(channelDir, DELIVERED_LOG + ".tmp");
+        try {
+            Files.write(tmp.toPath(), (String.join("\n", recent) + (recent.isEmpty() ? "" : "\n"))
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            deliveredLogLines.set(recent.size());
+        } catch (IOException ex) {
+            LOG.warning("channel " + name + ": could not compact " + DELIVERED_LOG + ": " + ex.getLocalizedMessage());
+            tmp.delete();
+        }
+    }
+
+    /** Reads {@code delivered.log} back into the history when the channel starts. */
+    private void loadDelivered() {
+        File log = new File(channelDir, DELIVERED_LOG);
+        if (!log.isFile()) {
+            return;
+        }
+        try {
+            List<String> lines = Files.readAllLines(log.toPath(), java.nio.charset.StandardCharsets.UTF_8);
+            int count = 0;
+            for (String line : lines) {
+                String id = line.trim();
+                if (!id.isEmpty()) {
+                    delivered.add(id);
+                    count++;
+                }
+            }
+            deliveredLogLines.set(count);
+            if (count > DEDUP_HISTORY) {
+                compactDeliveredLog(DEDUP_HISTORY);
+            }
+            LOG.fine("channel " + name + ": loaded " + delivered.size() + " delivered ids");
+        } catch (IOException ex) {
+            LOG.warning("channel " + name + ": could not read " + DELIVERED_LOG + ": " + ex.getLocalizedMessage());
         }
     }
 
@@ -551,6 +632,7 @@ final class SEDAMessageChannel implements MessageChannel {
                 LOG.severe("channel " + name + ": cannot create " + channelDir);
                 return false;
             }
+            loadDelivered();
         }
         queue = new ArrayBlockingQueue<>(capacity);
         accepting = true;

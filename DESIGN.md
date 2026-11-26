@@ -62,8 +62,19 @@ So a consumer advances an envelope simply by pushing a route and returning.
 | `AtLeastOnce`| written to the channel's store first    | replayed; consumers must be idempotent |
 | `ExactlyOnce`| as AtLeastOnce + delivered-id history   | replayed, duplicates skipped    |
 
-`ExactlyOnce` means *processing* effectively once (a bounded id history). It is not a
-distributed two-phase commit.
+`ExactlyOnce` means *processing* effectively once (a bounded history of delivered ids, the most recent
+100,000 per channel). It is not a distributed two-phase commit.
+
+The history is kept in `delivered.log` in the channel's store directory. An id is appended (synchronously) after
+the next stage has accepted the envelope and before the persisted copy is deleted, and the log is read back when
+the channel starts, so a restart does not forget what was delivered. The log is rewritten with the most recent ids
+when it holds twice the history. Two limits remain:
+
+- A crash after the next stage accepted the envelope and before its id was recorded replays the envelope, so the
+  next stage can see it twice. Closing that window needs the next stage to take part in the decision.
+- An `ExactlyOnce` envelope on a channel with no store directory (`AtMostOnce`) has an in-memory history only.
+
+Recording each id costs one synchronous disk write per `ExactlyOnce` delivery.
 
 ## What this is not
 

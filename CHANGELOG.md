@@ -6,6 +6,11 @@
   channel acknowledges (deletes the persisted copy) only after the next stage accepted, retries only the hand-over (the
   stage's own work is not run again), and dead-letters after `maxAttempts`. `ExactlyOnce` marks an envelope delivered
   only after the hand-over.
+- Fixed: the `ExactlyOnce` delivered-id history was in memory only, so a restart forgot it and replayed envelopes were
+  delivered again. It is now written to `delivered.log` in the channel's store directory (synchronously, after the next
+  stage accepted the envelope and before the persisted copy is deleted), read back at start, and compacted to the most
+  recent 100,000 ids. A crash between the next stage accepting an envelope and its id being recorded can still
+  replay it; this is documented in `DESIGN.md`.
 - Fixed: dead-lettering on a channel with no store directory (AtMostOnce) discarded the envelope silently. It is now
   kept in a bounded in-memory list (`SEDAMessageChannel.inMemoryDeadLetters()`, 1,000 most recent, lost on restart) and
   counted (`deadLetterCount()`), and a warning names it.

@@ -287,6 +287,123 @@ public class SEDABusTest {
         }
     }
 
+    private static Envelope exactlyOnceEnvelope(String channel) {
+        Envelope e = Envelope.documentFactory();
+        e.setServiceLevel(ServiceLevel.ExactlyOnce);
+        DLC.addRoute(channel, "handle", e);
+        return e;
+    }
+
+    private static SEDABus durableBus(String base) {
+        Properties p = new Properties();
+        p.setProperty("ra.sedabus.channel.locationBase", base);
+        SEDABus b = new SEDABus();
+        b.start(p);
+        return b;
+    }
+
+    @Test
+    public void exactlyOnceDeliveredIdsAreWrittenToDisk() throws Exception {
+        String base = System.getProperty("java.io.tmpdir") + "/seda-dedup-" + System.nanoTime();
+        SEDABus b = durableBus(base);
+        try {
+            CountDownLatch done = new CountDownLatch(1);
+            b.registerChannel("once", 50, ServiceLevel.ExactlyOnce, null, false);
+            b.registerAsynchConsumer("once", e -> {
+                done.countDown();
+                return true;
+            });
+            Envelope e = exactlyOnceEnvelope("once");
+            Assert.assertTrue(b.publish(e));
+            Assert.assertTrue(await(done, 10));
+            File log = new File(base + "/once", "delivered.log");
+            for (int i = 0; i < 100 && !log.exists(); i++) {
+                Thread.sleep(20);
+            }
+            Assert.assertTrue("delivered ids are kept on disk", log.exists());
+            Assert.assertTrue(new String(java.nio.file.Files.readAllBytes(log.toPath())).contains(e.getId()));
+        } finally {
+            b.gracefulShutdown();
+        }
+    }
+
+    @Test
+    public void aRestartSkipsWhatWasAlreadyDelivered() throws Exception {
+        String base = System.getProperty("java.io.tmpdir") + "/seda-dedup-restart-" + System.nanoTime();
+        Envelope delivered = exactlyOnceEnvelope("again");
+        SEDABus first = durableBus(base);
+        try {
+            CountDownLatch done = new CountDownLatch(1);
+            first.registerChannel("again", 50, ServiceLevel.ExactlyOnce, null, false);
+            first.registerAsynchConsumer("again", e -> {
+                done.countDown();
+                return true;
+            });
+            Assert.assertTrue(first.publish(delivered));
+            Assert.assertTrue(await(done, 10));
+            Thread.sleep(300);
+        } finally {
+            first.gracefulShutdown();
+        }
+
+        // A crash after the id was recorded and before the persisted copy was deleted leaves that copy behind, and
+        // another envelope that was never delivered is waiting too.
+        Envelope waiting = exactlyOnceEnvelope("again");
+        File dir = new File(base, "again");
+        java.nio.file.Files.write(new File(dir, String.format("%019d-%08d-%s.json", 1L, 1, delivered.getId())).toPath(),
+                delivered.toJSON().getBytes());
+        java.nio.file.Files.write(new File(dir, String.format("%019d-%08d-%s.json", 2L, 2, waiting.getId())).toPath(),
+                waiting.toJSON().getBytes());
+
+        SEDABus second = durableBus(base);
+        try {
+            ConcurrentLinkedQueue<String> seen = new ConcurrentLinkedQueue<>();
+            CountDownLatch got = new CountDownLatch(1);
+            SEDAMessageChannel channel = (SEDAMessageChannel) second.registerChannel("again", 50, ServiceLevel.ExactlyOnce, null, false);
+            second.registerAsynchConsumer("again", e -> {
+                seen.add(e.getId());
+                got.countDown();
+                return true;
+            });
+            channel.sendUnprocessed();
+            Assert.assertTrue(await(got, 10));
+            Thread.sleep(300);
+
+            Assert.assertEquals("only the envelope that was never delivered is delivered", 1, seen.size());
+            Assert.assertEquals(waiting.getId(), seen.peek());
+            Assert.assertFalse("the skipped envelope's copy is deleted",
+                    java.util.Arrays.stream(dir.listFiles()).anyMatch(f -> f.getName().contains(delivered.getId()) && f.getName().endsWith(".json")));
+        } finally {
+            second.gracefulShutdown();
+        }
+    }
+
+    @Test
+    public void theDeliveredLogIsCompactedToTheMostRecentIds() throws Exception {
+        String base = System.getProperty("java.io.tmpdir") + "/seda-dedup-compact-" + System.nanoTime();
+        SEDABus b = durableBus(base);
+        try {
+            CountDownLatch done = new CountDownLatch(30);
+            SEDAMessageChannel channel = (SEDAMessageChannel) b.registerChannel("compact", 100, ServiceLevel.ExactlyOnce, null, false);
+            b.registerAsynchConsumer("compact", e -> {
+                done.countDown();
+                return true;
+            });
+            for (int i = 0; i < 30; i++) {
+                Assert.assertTrue(b.publish(exactlyOnceEnvelope("compact")));
+            }
+            Assert.assertTrue(await(done, 10));
+            File log = new File(base + "/compact", "delivered.log");
+            for (int i = 0; i < 200 && (!log.exists() || java.nio.file.Files.readAllLines(log.toPath()).size() < 30); i++) {
+                Thread.sleep(20);
+            }
+            channel.compactDeliveredLog(10);
+            Assert.assertEquals(10, java.nio.file.Files.readAllLines(log.toPath()).size());
+        } finally {
+            b.gracefulShutdown();
+        }
+    }
+
     @Test
     public void rejectsWhenChannelAtCapacity() {
         CountDownLatch gate = new CountDownLatch(1);

@@ -54,8 +54,11 @@ added.
 | **Graceful shutdown** | pause, drain within a timeout, then stop the pool |
 
 `ExactlyOnce` here means *processing* effectively once (the channel remembers a
-bounded history of delivered ids and skips duplicates on replay). It is **not**
-a distributed two-phase commit; the earlier Javadoc claiming one was wrong.
+bounded history of delivered ids, kept on disk so it survives a restart, and skips
+duplicates on replay). It is **not** a distributed two-phase commit; the earlier
+Javadoc claiming one was wrong. A crash in the instant between the next stage
+accepting an envelope and its id being recorded can still replay it (see
+`DESIGN.md`).
 
 ## What this is not
 
