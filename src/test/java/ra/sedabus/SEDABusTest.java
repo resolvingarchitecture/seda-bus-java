@@ -166,6 +166,57 @@ public class SEDABusTest {
     }
 
     @Test
+    public void atMostOnceExhaustedRetriesAreDeadLetteredInMemory() throws Exception {
+        SEDAMessageChannel channel = (SEDAMessageChannel) bus.registerChannel("flaky-memory", 10, ServiceLevel.AtMostOnce, null, false);
+        CountDownLatch tried = new CountDownLatch(3);
+        bus.registerAsynchConsumer("flaky-memory", e -> {
+            tried.countDown();
+            return false;
+        });
+        Envelope e = Envelope.documentFactory();
+        DLC.addRoute("flaky-memory", "handle", e);
+        bus.publish(e);
+
+        Assert.assertTrue(await(tried, 10));
+        for (int i = 0; i < 50 && channel.inMemoryDeadLetters().isEmpty(); i++) {
+            Thread.sleep(20);
+        }
+        Assert.assertEquals(1, channel.inMemoryDeadLetters().size());
+        Assert.assertEquals(e.getId(), channel.inMemoryDeadLetters().get(0).getId());
+        Assert.assertEquals(1, channel.deadLetterCount());
+    }
+
+    @Test
+    public void atMostOnceFailedHandOverIsDeadLetteredNotLost() throws Exception {
+        SEDAMessageChannel channel = (SEDAMessageChannel) bus.registerChannel("first-memory", 10, ServiceLevel.AtMostOnce, null, false);
+        AtomicInteger runs = new AtomicInteger();
+        bus.registerAsynchConsumer("first-memory", e -> {
+            runs.incrementAndGet();
+            return true;
+        });
+        Envelope e = Envelope.documentFactory();
+        DLC.addRoute("missing-memory", "step", e);
+        DLC.addRoute("first-memory", "step", e);
+        bus.publish(e);
+
+        for (int i = 0; i < 100 && channel.inMemoryDeadLetters().isEmpty(); i++) {
+            Thread.sleep(20);
+        }
+        Assert.assertEquals("the stage's work is done once", 1, runs.get());
+        Assert.assertEquals(1, channel.inMemoryDeadLetters().size());
+    }
+
+    @Test
+    public void inMemoryDeadLettersAreBounded() {
+        SEDAMessageChannel channel = (SEDAMessageChannel) bus.registerChannel("bounded", 10, ServiceLevel.AtMostOnce, null, false);
+        for (int i = 0; i < SEDAMessageChannel.MAX_IN_MEMORY_DEAD_LETTERS + 5; i++) {
+            channel.deadLetter(Envelope.documentFactory());
+        }
+        Assert.assertEquals(SEDAMessageChannel.MAX_IN_MEMORY_DEAD_LETTERS, channel.inMemoryDeadLetters().size());
+        Assert.assertEquals(SEDAMessageChannel.MAX_IN_MEMORY_DEAD_LETTERS + 5, channel.deadLetterCount());
+    }
+
+    @Test
     public void rejectsWhenChannelAtCapacity() {
         CountDownLatch gate = new CountDownLatch(1);
         bus.registerChannel("slow", 2, ServiceLevel.AtMostOnce, null, false);

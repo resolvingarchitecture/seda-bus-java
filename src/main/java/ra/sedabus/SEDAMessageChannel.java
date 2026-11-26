@@ -84,6 +84,11 @@ final class SEDAMessageChannel implements MessageChannel {
     private final List<MessageChannel> subscriptionChannels = new ArrayList<>();
     private final AtomicInteger roundRobin = new AtomicInteger(0);
     private final Map<String, Integer> attempts = new ConcurrentHashMap<>();
+    /** Most dead letters kept in memory by a channel that has no store directory; the oldest go first. */
+    public static final int MAX_IN_MEMORY_DEAD_LETTERS = 1000;
+    /** Dead letters of a channel with no store directory (AtMostOnce), newest last. */
+    private final java.util.Deque<Envelope> inMemoryDeadLetters = new java.util.concurrent.ConcurrentLinkedDeque<>();
+    private final java.util.concurrent.atomic.AtomicLong deadLetterCount = new java.util.concurrent.atomic.AtomicLong();
     /** Envelopes this stage has handled but could not yet hand to the next stage. */
     private final java.util.Set<String> awaitingForward = ConcurrentHashMap.newKeySet();
 
@@ -245,8 +250,16 @@ final class SEDAMessageChannel implements MessageChannel {
 
     @Override
     public boolean deadLetter(Envelope envelope) {
+        deadLetterCount.incrementAndGet();
         if (channelDir == null) {
-            return false;
+            // No store directory (AtMostOnce): keep the most recent dead letters in memory, so a failed envelope is not
+            // silently discarded. They are lost on restart, which is what AtMostOnce means.
+            inMemoryDeadLetters.addLast(envelope);
+            while (inMemoryDeadLetters.size() > MAX_IN_MEMORY_DEAD_LETTERS) {
+                inMemoryDeadLetters.pollFirst();
+            }
+            LOG.warning("channel " + name + ": dead-lettered " + envelope.getId() + " (kept in memory; " + inMemoryDeadLetters.size() + " held)");
+            return true;
         }
         File dlFile = new File(channelDir, "deadLetter.json");
         try {
@@ -259,6 +272,16 @@ final class SEDAMessageChannel implements MessageChannel {
             return false;
         }
         return true;
+    }
+
+    /** The dead letters held in memory (a channel with no store directory), oldest first. Persisted channels write theirs to deadLetter.json. */
+    public java.util.List<Envelope> inMemoryDeadLetters() {
+        return new ArrayList<>(inMemoryDeadLetters);
+    }
+
+    /** How many envelopes this channel has dead-lettered since it started, wherever they were kept. */
+    public long deadLetterCount() {
+        return deadLetterCount.get();
     }
 
     /** Blocking receive + process. Used by tests / polling consumers. */
