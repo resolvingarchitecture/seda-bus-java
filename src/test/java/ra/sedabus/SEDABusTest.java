@@ -142,7 +142,9 @@ public class SEDABusTest {
         durableBus.start(p);
         try {
             AtomicInteger runs = new AtomicInteger();
-            durableBus.registerChannel("first", 50, ServiceLevel.AtLeastOnce, null, false);
+            SEDAMessageChannel first = (SEDAMessageChannel) durableBus.registerChannel("first", 50, ServiceLevel.AtLeastOnce, null, false);
+            first.setRetryBackoff(5, 20);
+            first.setHandOverAttempts(3);
             durableBus.registerAsynchConsumer("first", e -> {
                 runs.incrementAndGet();
                 return true;
@@ -152,7 +154,9 @@ public class SEDABusTest {
             DLC.addRoute("missing", "step", e);
             DLC.addRoute("first", "step", e);
             Assert.assertTrue(durableBus.publish(e));
-            Thread.sleep(1000);
+            for (int i = 0; i < 250 && first.deadLetterCount() == 0; i++) {
+                Thread.sleep(20);
+            }
 
             Assert.assertEquals("the stage's work is done once, not once per hand-over attempt", 1, runs.get());
             File dir = new File(base, "first");
@@ -190,6 +194,8 @@ public class SEDABusTest {
     @Test
     public void atMostOnceFailedHandOverIsDeadLetteredNotLost() throws Exception {
         SEDAMessageChannel channel = (SEDAMessageChannel) bus.registerChannel("first-memory", 10, ServiceLevel.AtMostOnce, null, false);
+        channel.setRetryBackoff(5, 20);
+        channel.setHandOverAttempts(3);
         AtomicInteger runs = new AtomicInteger();
         bus.registerAsynchConsumer("first-memory", e -> {
             runs.incrementAndGet();
@@ -402,6 +408,76 @@ public class SEDABusTest {
         } finally {
             b.gracefulShutdown();
         }
+    }
+
+    @Test
+    public void retryDelaysDoubleUpToACapWithJitter() {
+        SEDAMessageChannel channel = (SEDAMessageChannel) bus.registerChannel("backoff");
+        channel.setRetryBackoff(100, 1000);
+        long[] expected = {100, 200, 400, 800, 1000, 1000};
+        for (int attempt = 1; attempt <= expected.length; attempt++) {
+            for (int i = 0; i < 20; i++) {
+                long delay = channel.backoffMs(attempt);
+                Assert.assertTrue("attempt " + attempt + " delay " + delay,
+                        delay >= Math.round(expected[attempt - 1] * 0.8) && delay <= Math.round(expected[attempt - 1] * 1.2));
+            }
+        }
+    }
+
+    @Test
+    public void aNextStageThatAppearsLaterStillGetsTheEnvelope() throws Exception {
+        SEDAMessageChannel first = (SEDAMessageChannel) bus.registerChannel("early", 10, ServiceLevel.AtMostOnce, null, false);
+        first.setRetryBackoff(20, 100);
+        first.setHandOverAttempts(20);
+        AtomicInteger earlyRuns = new AtomicInteger();
+        bus.registerAsynchConsumer("early", e -> {
+            earlyRuns.incrementAndGet();
+            return true;
+        });
+        Envelope e = Envelope.documentFactory();
+        DLC.addRoute("late", "step", e);
+        DLC.addRoute("early", "step", e);
+        CountDownLatch done = new CountDownLatch(1);
+        Assert.assertTrue(bus.publish(e, env -> done.countDown()));
+
+        // The next stage is not there yet; it is registered while the hand-over is being retried.
+        Thread.sleep(300);
+        Assert.assertEquals("not dead-lettered while the retries last", 0, first.deadLetterCount());
+        CountDownLatch lateRan = new CountDownLatch(1);
+        bus.registerChannel("late");
+        bus.registerAsynchConsumer("late", env -> {
+            lateRan.countDown();
+            return true;
+        });
+
+        Assert.assertTrue("the envelope reaches the stage once it exists", await(lateRan, 10));
+        Assert.assertTrue(await(done, 10));
+        Assert.assertEquals("the first stage's work was done once", 1, earlyRuns.get());
+        Assert.assertEquals(0, first.deadLetterCount());
+    }
+
+    @Test
+    public void retriesDoNotHoldAWorkerWhileTheyWait() throws Exception {
+        SEDAMessageChannel slow = (SEDAMessageChannel) bus.registerChannel("waits", 10, ServiceLevel.AtMostOnce, null, false);
+        slow.setRetryBackoff(2_000, 2_000); // a long wait that would show if a worker slept through it
+        bus.registerAsynchConsumer("waits", e -> false);
+        CountDownLatch other = new CountDownLatch(1);
+        bus.registerChannel("other");
+        bus.registerAsynchConsumer("other", e -> {
+            other.countDown();
+            return true;
+        });
+        Envelope failing = Envelope.documentFactory();
+        DLC.addRoute("waits", "handle", failing);
+        bus.publish(failing);
+        Thread.sleep(100); // the first attempt failed; its retry is waiting two seconds
+
+        Envelope fine = Envelope.documentFactory();
+        DLC.addRoute("other", "handle", fine);
+        long start = System.currentTimeMillis();
+        bus.publish(fine);
+        Assert.assertTrue(await(other, 5));
+        Assert.assertTrue("other work was not held up by the waiting retry", System.currentTimeMillis() - start < 1_000);
     }
 
     @Test

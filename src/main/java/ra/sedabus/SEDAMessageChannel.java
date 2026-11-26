@@ -90,6 +90,22 @@ final class SEDAMessageChannel implements MessageChannel {
     private final java.util.Deque<Envelope> inMemoryDeadLetters = new java.util.concurrent.ConcurrentLinkedDeque<>();
     private final java.util.concurrent.atomic.AtomicLong evictedCount = new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deadLetterCount = new java.util.concurrent.atomic.AtomicLong();
+    /** First retry delay, doubled for each further attempt (with jitter) up to {@link #retryMaxMs}. */
+    private volatile long retryBaseMs = 50;
+    private volatile long retryMaxMs = 2_000;
+    /**
+     * How many times a hand-over to a full or paused next stage is tried before the envelope is dead-lettered. Larger than
+     * {@code maxAttempts}, which counts failures of this stage's own consumers: pressure downstream is usually temporary.
+     */
+    private volatile int handOverAttempts = 10;
+    /** Retries waiting for their delay; the channel is not drained while any are pending. */
+    private final AtomicInteger pendingRetries = new AtomicInteger();
+    private static final java.util.concurrent.ScheduledExecutorService RETRY_TIMER =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "seda-retry");
+                t.setDaemon(true);
+                return t;
+            });
     /** Envelopes this stage has handled but could not yet hand to the next stage. */
     private final java.util.Set<String> awaitingForward = ConcurrentHashMap.newKeySet();
 
@@ -392,20 +408,70 @@ final class SEDAMessageChannel implements MessageChannel {
         }
 
         int n = attempts.merge(envelope.getId(), 1, Integer::sum);
-        if (n < maxAttempts) {
-            LOG.fine("channel " + name + ": retry " + n + " for " + envelope.getId());
-            if (!queue.offer(envelope)) {
-                LOG.warning("channel " + name + ": no room to retry " + envelope.getId() + "; dead-lettering");
-                deadLetter(envelope);
-                ack(envelope);
-                failedToBus(envelope, "channel " + name + " dead-lettered this envelope: no room to retry");
-            }
+        // Failures of this stage's own consumers get maxAttempts; a hand-over that keeps being refused gets a longer budget.
+        int budget = awaitingForward.contains(envelope.getId()) ? Math.max(maxAttempts, handOverAttempts) : maxAttempts;
+        if (n < budget) {
+            long delay = backoffMs(n);
+            LOG.fine("channel " + name + ": retry " + n + " for " + envelope.getId() + " in " + delay + " ms");
+            scheduleRetry(envelope, delay);
         } else {
             LOG.warning("channel " + name + ": " + envelope.getId() + " failed " + n + " attempts; dead-lettering");
-            deadLetter(envelope);
-            ack(envelope);
-            failedToBus(envelope, "channel " + name + " dead-lettered this envelope after " + n + " attempts");
+            giveUp(envelope, "channel " + name + " dead-lettered this envelope after " + n + " attempts");
         }
+    }
+
+    private void giveUp(Envelope envelope, String reason) {
+        deadLetter(envelope);
+        ack(envelope);
+        failedToBus(envelope, reason);
+    }
+
+    /** The delay before retry number {@code attempt}: base times two for each earlier retry, capped, give or take a fifth. */
+    long backoffMs(int attempt) {
+        long delay = retryBaseMs;
+        for (int i = 1; i < attempt && delay < retryMaxMs; i++) {
+            delay *= 2;
+        }
+        delay = Math.min(delay, retryMaxMs);
+        double jitter = 0.8 + java.util.concurrent.ThreadLocalRandom.current().nextDouble() * 0.4;
+        return Math.max(1, Math.round(delay * jitter));
+    }
+
+    /** Puts the envelope back in the queue after {@code delayMs}, without holding a worker thread while it waits. */
+    private void scheduleRetry(Envelope envelope, long delayMs) {
+        pendingRetries.incrementAndGet();
+        try {
+            RETRY_TIMER.schedule(() -> {
+                try {
+                    if (queue.offer(envelope)) {
+                        if (bus instanceof SEDABus) {
+                            ((SEDABus) bus).wake(this);
+                        }
+                    } else {
+                        LOG.warning("channel " + name + ": no room to retry " + envelope.getId() + "; dead-lettering");
+                        giveUp(envelope, "channel " + name + " dead-lettered this envelope: no room to retry");
+                    }
+                } catch (RuntimeException e) {
+                    LOG.log(Level.WARNING, "channel " + name + ": retry of " + envelope.getId() + " failed", e);
+                } finally {
+                    pendingRetries.decrementAndGet();
+                }
+            }, delayMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            pendingRetries.decrementAndGet();
+            giveUp(envelope, "channel " + name + " dead-lettered this envelope: the retry could not be scheduled");
+        }
+    }
+
+    /** Sets the retry delay: {@code baseMs} for the first retry, doubled for each further one, up to {@code maxMs}. */
+    public void setRetryBackoff(long baseMs, long maxMs) {
+        this.retryBaseMs = Math.max(1, baseMs);
+        this.retryMaxMs = Math.max(this.retryBaseMs, maxMs);
+    }
+
+    /** Sets how many times a refused hand-over to the next stage is tried before the envelope is dead-lettered. */
+    public void setHandOverAttempts(int attempts) {
+        this.handOverAttempts = Math.max(1, attempts);
     }
 
     private boolean fanOut(Envelope envelope, String op) {
@@ -670,7 +736,7 @@ final class SEDAMessageChannel implements MessageChannel {
 
     private boolean drainWithin(long maxWaitMs) {
         long deadline = System.currentTimeMillis() + maxWaitMs;
-        while (queued() > 0 && System.currentTimeMillis() < deadline) {
+        while ((queued() > 0 || pendingRetries.get() > 0) && System.currentTimeMillis() < deadline) {
             try {
                 Thread.sleep(20L);
             } catch (InterruptedException e) {
@@ -678,7 +744,7 @@ final class SEDAMessageChannel implements MessageChannel {
                 break;
             }
         }
-        return queued() == 0;
+        return queued() == 0 && pendingRetries.get() == 0;
     }
 
     // -- persistence -------------------------------------------------

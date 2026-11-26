@@ -133,6 +133,11 @@ public class SEDABus implements MessageBus {
         }
     }
 
+    /** Called by a channel that has put an envelope back in its queue from another thread, so the pool drains it. */
+    void wake(MessageChannel channel) {
+        pool.schedule(channel);
+    }
+
     /** How many producer callbacks are waiting for their envelope to finish. */
     int pendingCallbacks() {
         return callbacks.size();

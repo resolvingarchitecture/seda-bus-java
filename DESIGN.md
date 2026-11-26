@@ -76,6 +76,19 @@ when it holds twice the history. Two limits remain:
 
 Recording each id costs one synchronous disk write per `ExactlyOnce` delivery.
 
+## Retry and hand-over
+
+A nacked envelope (the consumer returned `false`) is retried up to `maxAttempts` (default 3), then dead-lettered. When
+the stage has done its work but the next stage refuses the envelope (full, paused, or not registered yet), only the
+hand-over is retried, not the consumer, for up to `handOverAttempts` (default 10), because pressure downstream is
+usually temporary.
+
+Retries wait: the first after 50 ms, each next one twice as long, up to 2 s, give or take a fifth. The wait happens on a
+timer thread, so no worker is held while an envelope waits, and a stage that is slow to recover does not stall the
+others. `SEDAMessageChannel.setRetryBackoff(baseMs, maxMs)` and `setHandOverAttempts(n)` change the defaults. Until an
+envelope's retry delay has passed it is not in the queue; a graceful shutdown waits for pending retries (persisted
+envelopes are replayed after a restart in any case).
+
 ## What this is not
 
 SEDA's original design had a **controller** that watched per-stage latency and queue

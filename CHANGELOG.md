@@ -6,6 +6,10 @@
   channel acknowledges (deletes the persisted copy) only after the next stage accepted, retries only the hand-over (the
   stage's own work is not run again), and dead-letters after `maxAttempts`. `ExactlyOnce` marks an envelope delivered
   only after the hand-over.
+- Fixed: retries were immediate, so a briefly full or paused next stage turned into dead letters within moments.
+  Retries now back off (50 ms, doubling to 2 s, with jitter) on a timer thread, without holding a worker. A refused
+  hand-over is retried up to `handOverAttempts` (default 10) times, separate from `maxAttempts`, and only the hand-over
+  is retried. `setRetryBackoff` and `setHandOverAttempts` change the defaults.
 - Fixed: the `ExactlyOnce` delivered-id history was in memory only, so a restart forgot it and replayed envelopes were
   delivered again. It is now written to `delivered.log` in the channel's store directory (synchronously, after the next
   stage accepted the envelope and before the persisted copy is deleted), read back at start, and compacted to the most
