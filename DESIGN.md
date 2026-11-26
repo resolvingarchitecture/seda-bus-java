@@ -83,11 +83,27 @@ the stage has done its work but the next stage refuses the envelope (full, pause
 hand-over is retried, not the consumer, for up to `handOverAttempts` (default 10), because pressure downstream is
 usually temporary.
 
-Retries wait: the first after 50 ms, each next one twice as long, up to 2 s, give or take a fifth. The wait happens on a
-timer thread, so no worker is held while an envelope waits, and a stage that is slow to recover does not stall the
-others. `SEDAMessageChannel.setRetryBackoff(baseMs, maxMs)` and `setHandOverAttempts(n)` change the defaults. Until an
-envelope's retry delay has passed it is not in the queue; a graceful shutdown waits for pending retries (persisted
-envelopes are replayed after a restart in any case).
+Retries wait: the first after 50 ms, each next one twice as long, up to 2 s, give or take a fifth. The wait happens on
+the bus's own retry timer (one daemon thread per bus, started with the bus and stopped with it), so no worker is held
+while an envelope waits, a stage that is slow to recover does not stall the others, and one bus's retries never wait
+behind another's. An envelope waiting for its retry is out of the queue, so `queued()` does not count it; use
+`pendingRetries()`.
+
+Settings are properties of the bus, applied to every channel it registers: `ra.sedabus.retry.baseMs` (50),
+`ra.sedabus.retry.maxMs` (2000) and `ra.sedabus.retry.handOverAttempts` (10). A single channel can be changed with
+`setRetryBackoff(baseMs, maxMs)` and `setHandOverAttempts(n)` on the `SEDAMessageChannel` that `SEDABus.getChannel(name)`
+returns.
+
+**When an envelope is given up on** (its retries ran out, or `DropOldest` pushed it out of a full queue): it is
+dead-lettered (a persisted channel writes `deadLetter.json`, others keep the 1,000 most recent in memory), the
+producer's callback is released and replied to with an error message on the envelope, and the bus's
+`DeadLetterListener` (`SEDABus.setDeadLetterListener`) is called with the channel, the envelope and the reason. Counters:
+`deadLetterCount()`, `evictedCount()`, `pendingRetries()`.
+
+**When the bus stops with retries waiting** (a graceful shutdown waits up to 30 s for them, `shutdown()` 3 s): a
+persisted envelope keeps its copy on disk and is replayed at the next start; one that was never persisted (`AtMostOnce`)
+is given up on as above, with the reason "stopped before this envelope could be retried". A stopped bus accepts nothing
+new, and a retry that comes up for scheduling after the timer has stopped is given up on in the same way.
 
 ## What this is not
 

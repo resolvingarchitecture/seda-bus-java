@@ -42,6 +42,35 @@ public class SEDABus implements MessageBus {
     private final Map<String, Client> callbacks = new ConcurrentHashMap<>();
     private WorkerThreadPool pool;
     private volatile Status status = Status.Stopped;
+    /** Waits out retry delays for every channel of this bus, on its own thread; created at start, stopped at shutdown. */
+    private volatile java.util.concurrent.ScheduledExecutorService retryTimer;
+    private static final java.util.concurrent.atomic.AtomicInteger TIMER_IDS = new java.util.concurrent.atomic.AtomicInteger();
+    private volatile DeadLetterListener deadLetterListener;
+
+    /** Defaults for every channel registered on this bus; see the {@code ra.sedabus.retry.*} properties. */
+    private volatile long retryBaseMs = 50;
+    private volatile long retryMaxMs = 2_000;
+    private volatile int handOverAttempts = 10;
+
+    /**
+     * Told when a channel gives up on an envelope: it was dead-lettered after its retries, or pushed out by
+     * {@link Backpressure#DropOldest}. Called on a bus thread, so it should return quickly. The producer's callback,
+     * when there is one, is also released with an error message on the envelope.
+     */
+    public interface DeadLetterListener {
+        void deadLettered(String channel, Envelope envelope, String reason);
+    }
+
+    /** Sets (or, with null, clears) the listener told when an envelope is given up on. */
+    public void setDeadLetterListener(DeadLetterListener listener) {
+        this.deadLetterListener = listener;
+    }
+
+    /** The channel registered under {@code name}, with its settings and counters, or null. */
+    public SEDAMessageChannel getChannel(String name) {
+        MessageChannel channel = namedChannels.get(name);
+        return channel instanceof SEDAMessageChannel ? (SEDAMessageChannel) channel : null;
+    }
 
     public SEDABus() {
     }
@@ -125,12 +154,29 @@ public class SEDABus implements MessageBus {
      * Called by a channel when it gives up on an envelope (dead-lettered, or evicted to make room): releases the producer's
      * callback, so the map does not keep it for ever, and tells the producer, with an error message on the envelope.
      */
-    void failed(Envelope e, String reason) {
+    void failed(String channel, Envelope e, String reason) {
+        DeadLetterListener listener = deadLetterListener;
+        if (listener != null) {
+            try {
+                listener.deadLettered(channel, e, reason);
+            } catch (RuntimeException ex) {
+                LOG.warning("dead-letter listener threw for " + e.getId() + ": " + ex);
+            }
+        }
         Client client = callbacks.remove(e.getId());
         if (client != null) {
             DLC.addErrorMessage(reason, e);
             client.reply(e);
         }
+    }
+
+    /** Runs {@code task} after {@code delayMs} on this bus's retry timer. Throws if the bus is not running. */
+    void scheduleRetry(Runnable task, long delayMs) {
+        java.util.concurrent.ScheduledExecutorService timer = retryTimer;
+        if (timer == null) {
+            throw new java.util.concurrent.RejectedExecutionException("SEDABus " + status.name());
+        }
+        timer.schedule(task, delayMs, java.util.concurrent.TimeUnit.MILLISECONDS);
     }
 
     /** Called by a channel that has put an envelope back in its queue from another thread, so the pool drains it. */
@@ -242,6 +288,8 @@ public class SEDABus implements MessageBus {
     }
 
     private MessageChannel register(SEDAMessageChannel channel, int concurrency) {
+        channel.setRetryBackoff(retryBaseMs, retryMaxMs);
+        channel.setHandOverAttempts(handOverAttempts);
         if (!channel.start(config)) {
             LOG.warning("channel " + channel.getName() + " failed to start");
             return null;
@@ -293,6 +341,17 @@ public class SEDABus implements MessageBus {
     public boolean start(Properties properties) {
         status = Status.Starting;
         setConfig(properties);
+        retryBaseMs = longProperty("ra.sedabus.retry.baseMs", 50);
+        retryMaxMs = longProperty("ra.sedabus.retry.maxMs", 2_000);
+        handOverAttempts = (int) longProperty("ra.sedabus.retry.handOverAttempts", 10);
+        int timerId = TIMER_IDS.incrementAndGet();
+        java.util.concurrent.ScheduledThreadPoolExecutor timer = new java.util.concurrent.ScheduledThreadPoolExecutor(1, r -> {
+            Thread t = new Thread(r, "seda-retry-" + timerId);
+            t.setDaemon(true);
+            return t;
+        });
+        timer.setRemoveOnCancelPolicy(true);
+        retryTimer = timer;
         pool = new WorkerThreadPool(config);
         pool.start();
         status = Status.Running;
@@ -343,7 +402,27 @@ public class SEDABus implements MessageBus {
         if (pool != null) {
             pool.shutdown();
         }
+        // The channels have waited for their pending retries (up to 30 s for a graceful shutdown, 3 s otherwise); any
+        // still waiting are cancelled. Persisted envelopes are replayed at the next start, AtMostOnce ones are lost.
+        java.util.concurrent.ScheduledExecutorService timer = retryTimer;
+        retryTimer = null;
+        if (timer != null) {
+            timer.shutdownNow();
+        }
         status = Status.Stopped;
         return drained;
+    }
+
+    private long longProperty(String key, long fallback) {
+        String value = config == null ? null : config.getProperty(key);
+        if (value == null) {
+            return fallback;
+        }
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            LOG.warning("bad " + key + ": " + value);
+            return fallback;
+        }
     }
 }

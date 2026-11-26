@@ -154,7 +154,8 @@ public class SEDABusTest {
             DLC.addRoute("missing", "step", e);
             DLC.addRoute("first", "step", e);
             Assert.assertTrue(durableBus.publish(e));
-            for (int i = 0; i < 250 && first.deadLetterCount() == 0; i++) {
+            File deadLetterFile = new File(base, "first/deadLetter.json");
+            for (int i = 0; i < 250 && !(deadLetterFile.exists() && deadLetterFile.length() > 0); i++) {
                 Thread.sleep(20);
             }
 
@@ -640,17 +641,21 @@ public class SEDABusTest {
         DLC.addRoute("empty", "handle", e);
         Assert.assertTrue(bus.publish(e));
 
-        // No consumer will ever ack it; the bounded number of immediate
-        // retries (no backoff) needs a moment to exhaust and dead-letter.
-        long deadline = System.currentTimeMillis() + 2000;
-        while (ch.queued() > 0 && System.currentTimeMillis() < deadline) {
+        // No consumer will ever ack it; the bounded retries (with backoff, on the bus's timer) take a moment to run out.
+        // The queue is empty while a retry waits, so the proof is the dead letter itself, not an empty queue.
+        SEDAMessageChannel channel = (SEDAMessageChannel) ch;
+        long deadline = System.currentTimeMillis() + 5000;
+        while (channel.deadLetterCount() == 0 && System.currentTimeMillis() < deadline) {
             try {
                 Thread.sleep(20);
             } catch (InterruptedException ignored) {
             }
         }
-        Assert.assertEquals("a no-consumer channel must eventually dead-letter, not leave the envelope queued forever",
-                0, ch.queued());
+        Assert.assertEquals("a no-consumer channel must dead-letter the envelope, not lose it",
+                1, channel.deadLetterCount());
+        Assert.assertEquals(e.getId(), channel.inMemoryDeadLetters().get(0).getId());
+        Assert.assertEquals(0, ch.queued());
+        Assert.assertEquals(0, channel.pendingRetries());
     }
 
     @Test

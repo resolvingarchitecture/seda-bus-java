@@ -58,7 +58,7 @@ import java.util.logging.Logger;
  * per registered subscription channel; otherwise it is delivered point-to-point,
  * round-robin across the channel's own consumers.
  */
-final class SEDAMessageChannel implements MessageChannel {
+public final class SEDAMessageChannel implements MessageChannel {
 
     private static final Logger LOG = Logger.getLogger(SEDAMessageChannel.class.getName());
 
@@ -98,14 +98,8 @@ final class SEDAMessageChannel implements MessageChannel {
      * {@code maxAttempts}, which counts failures of this stage's own consumers: pressure downstream is usually temporary.
      */
     private volatile int handOverAttempts = 10;
-    /** Retries waiting for their delay; the channel is not drained while any are pending. */
-    private final AtomicInteger pendingRetries = new AtomicInteger();
-    private static final java.util.concurrent.ScheduledExecutorService RETRY_TIMER =
-            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "seda-retry");
-                t.setDaemon(true);
-                return t;
-            });
+    /** Envelopes waiting out a retry delay, by id; they are not in the queue. */
+    private final Map<String, Envelope> retrying = new ConcurrentHashMap<>();
     /** Envelopes this stage has handled but could not yet hand to the next stage. */
     private final java.util.Set<String> awaitingForward = ConcurrentHashMap.newKeySet();
 
@@ -284,7 +278,7 @@ final class SEDAMessageChannel implements MessageChannel {
 
     private void failedToBus(Envelope envelope, String reason) {
         if (bus instanceof SEDABus) {
-            ((SEDABus) bus).failed(envelope, reason);
+            ((SEDABus) bus).failed(name, envelope, reason);
         }
     }
 
@@ -427,7 +421,7 @@ final class SEDAMessageChannel implements MessageChannel {
     }
 
     /** The delay before retry number {@code attempt}: base times two for each earlier retry, capped, give or take a fifth. */
-    long backoffMs(int attempt) {
+    public long backoffMs(int attempt) {
         long delay = retryBaseMs;
         for (int i = 1; i < attempt && delay < retryMaxMs; i++) {
             delay *= 2;
@@ -437,29 +431,58 @@ final class SEDAMessageChannel implements MessageChannel {
         return Math.max(1, Math.round(delay * jitter));
     }
 
-    /** Puts the envelope back in the queue after {@code delayMs}, without holding a worker thread while it waits. */
+    /** Puts the envelope back in the queue after {@code delayMs}, on the bus's retry timer, without holding a worker thread. */
     private void scheduleRetry(Envelope envelope, long delayMs) {
-        pendingRetries.incrementAndGet();
+        String id = envelope.getId();
+        retrying.put(id, envelope);
         try {
-            RETRY_TIMER.schedule(() -> {
+            if (!(bus instanceof SEDABus)) {
+                throw new java.util.concurrent.RejectedExecutionException("no retry timer on this bus");
+            }
+            ((SEDABus) bus).scheduleRetry(() -> {
+                // Gone if the channel gave up on it at shutdown while this was waiting.
+                if (retrying.remove(id) == null) {
+                    return;
+                }
                 try {
                     if (queue.offer(envelope)) {
-                        if (bus instanceof SEDABus) {
-                            ((SEDABus) bus).wake(this);
-                        }
+                        ((SEDABus) bus).wake(this);
                     } else {
-                        LOG.warning("channel " + name + ": no room to retry " + envelope.getId() + "; dead-lettering");
+                        LOG.warning("channel " + name + ": no room to retry " + id + "; dead-lettering");
                         giveUp(envelope, "channel " + name + " dead-lettered this envelope: no room to retry");
                     }
                 } catch (RuntimeException e) {
-                    LOG.log(Level.WARNING, "channel " + name + ": retry of " + envelope.getId() + " failed", e);
-                } finally {
-                    pendingRetries.decrementAndGet();
+                    LOG.log(Level.WARNING, "channel " + name + ": retry of " + id + " failed", e);
                 }
-            }, delayMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }, delayMs);
         } catch (java.util.concurrent.RejectedExecutionException e) {
-            pendingRetries.decrementAndGet();
-            giveUp(envelope, "channel " + name + " dead-lettered this envelope: the retry could not be scheduled");
+            // The bus is stopped (or has no timer): the retry cannot wait, so the envelope is given up on, not lost silently.
+            retrying.remove(id);
+            giveUp(envelope, "channel " + name + " dead-lettered this envelope: the bus is stopped, so the retry could not be scheduled");
+        }
+    }
+
+    /** How many envelopes are waiting out a retry delay; they are not in the queue, so {@link #queued()} does not count them. */
+    public int pendingRetries() {
+        return retrying.size();
+    }
+
+    /**
+     * Retries still waiting when the channel stops are not run. A persisted envelope keeps its copy on disk and is replayed at
+     * the next start; one that was never persisted (AtMostOnce) is given up on, so the listener and the producer hear of it.
+     */
+    private void abandonPendingRetries() {
+        for (Envelope envelope : new ArrayList<>(retrying.values())) {
+            if (retrying.remove(envelope.getId()) == null) {
+                continue;
+            }
+            if (guaranteed()) {
+                LOG.info("channel " + name + ": stopped with " + envelope.getId() + " waiting to be retried; it is replayed at the next start");
+                attempts.remove(envelope.getId());
+                awaitingForward.remove(envelope.getId());
+            } else {
+                giveUp(envelope, "channel " + name + " stopped before this envelope could be retried");
+            }
         }
     }
 
@@ -467,6 +490,11 @@ final class SEDAMessageChannel implements MessageChannel {
     public void setRetryBackoff(long baseMs, long maxMs) {
         this.retryBaseMs = Math.max(1, baseMs);
         this.retryMaxMs = Math.max(this.retryBaseMs, maxMs);
+    }
+
+    /** How many times a refused hand-over to the next stage is tried before the envelope is dead-lettered. */
+    public int handOverAttempts() {
+        return handOverAttempts;
     }
 
     /** Sets how many times a refused hand-over to the next stage is tried before the envelope is dead-lettered. */
@@ -736,7 +764,7 @@ final class SEDAMessageChannel implements MessageChannel {
 
     private boolean drainWithin(long maxWaitMs) {
         long deadline = System.currentTimeMillis() + maxWaitMs;
-        while ((queued() > 0 || pendingRetries.get() > 0) && System.currentTimeMillis() < deadline) {
+        while ((queued() > 0 || !retrying.isEmpty()) && System.currentTimeMillis() < deadline) {
             try {
                 Thread.sleep(20L);
             } catch (InterruptedException e) {
@@ -744,7 +772,11 @@ final class SEDAMessageChannel implements MessageChannel {
                 break;
             }
         }
-        return queued() == 0 && pendingRetries.get() == 0;
+        boolean drained = queued() == 0 && retrying.isEmpty();
+        if (!drained) {
+            abandonPendingRetries();
+        }
+        return drained;
     }
 
     // -- persistence -------------------------------------------------

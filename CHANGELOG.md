@@ -6,6 +6,13 @@
   channel acknowledges (deletes the persisted copy) only after the next stage accepted, retries only the hand-over (the
   stage's own work is not run again), and dead-letters after `maxAttempts`. `ExactlyOnce` marks an envelope delivered
   only after the hand-over.
+- Fixed: retries shared one static timer thread across every bus in the process, never stopped; each bus now owns its
+  timer (started and stopped with it), so one bus's retries do not wait behind another's and none fire after shutdown. A
+  retry still waiting at shutdown is no longer cancelled without trace: a persisted envelope keeps its copy for the next
+  start, any other is given up on and reported.
+- Added: the settings and counters are reachable. `SEDAMessageChannel` is public and `SEDABus.getChannel(name)` returns it;
+  retry settings are bus properties (`ra.sedabus.retry.baseMs`, `.maxMs`, `.handOverAttempts`); `pendingRetries()` counts
+  envelopes waiting out a retry delay; `SEDABus.setDeadLetterListener` is told when an envelope is dead-lettered or evicted.
 - Fixed: retries were immediate, so a briefly full or paused next stage turned into dead letters within moments.
   Retries now back off (50 ms, doubling to 2 s, with jitter) on a timer thread, without holding a worker. A refused
   hand-over is retried up to `handOverAttempts` (default 10) times, separate from `maxAttempts`, and only the hand-over
