@@ -84,6 +84,8 @@ final class SEDAMessageChannel implements MessageChannel {
     private final List<MessageChannel> subscriptionChannels = new ArrayList<>();
     private final AtomicInteger roundRobin = new AtomicInteger(0);
     private final Map<String, Integer> attempts = new ConcurrentHashMap<>();
+    /** Envelopes this stage has handled but could not yet hand to the next stage. */
+    private final java.util.Set<String> awaitingForward = ConcurrentHashMap.newKeySet();
 
     /** Bounded set of already-delivered ids for ExactlyOnce dedup on replay. */
     private final Set<String> delivered = Collections.newSetFromMap(
@@ -167,6 +169,7 @@ final class SEDAMessageChannel implements MessageChannel {
     @Override
     public void ack(Envelope envelope) {
         attempts.remove(envelope.getId());
+        awaitingForward.remove(envelope.getId());
         if (guaranteed()) {
             removePersisted(envelope);
         }
@@ -247,7 +250,10 @@ final class SEDAMessageChannel implements MessageChannel {
         }
         File dlFile = new File(channelDir, "deadLetter.json");
         try {
-            FileUtil.appendFile((envelope.toJSON() + System.lineSeparator()).getBytes(), dlFile.getAbsolutePath());
+            // CREATE as well as APPEND: FileUtil.appendFile only appends, so the first dead letter could never be written.
+            java.nio.file.Files.write(dlFile.toPath(),
+                    (envelope.toJSON() + System.lineSeparator()).getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
         } catch (IOException ex) {
             LOG.warning(ex.getLocalizedMessage());
             return false;
@@ -304,18 +310,27 @@ final class SEDAMessageChannel implements MessageChannel {
             return;
         }
 
+        // An envelope this stage already handled but could not hand on is not handled again: only the hand-over is retried.
         boolean ok;
-        if (pubSub) {
+        if (awaitingForward.contains(envelope.getId())) {
+            ok = true;
+        } else if (pubSub) {
             ok = fanOut(envelope, op);
         } else {
             ok = deliverPointToPoint(envelope);
         }
 
         if (ok) {
-            markDelivered(envelope);
-            ack(envelope);
-            bus.completed(envelope);
-            return;
+            // Acknowledge (delete the persisted copy) only once the next stage has accepted the envelope, or the
+            // itinerary has ended; until then the persisted copy is what stops a failed hand-over losing it.
+            if (bus.completed(envelope)) {
+                awaitingForward.remove(envelope.getId());
+                markDelivered(envelope);
+                ack(envelope);
+                return;
+            }
+            awaitingForward.add(envelope.getId());
+            LOG.warning("channel " + name + ": next stage did not accept " + envelope.getId());
         }
 
         int n = attempts.merge(envelope.getId(), 1, Integer::sum);

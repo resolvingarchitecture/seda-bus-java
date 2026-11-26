@@ -98,6 +98,74 @@ public class SEDABusTest {
     }
 
     @Test
+    public void handOverToAnUnknownStageLeavesTheEnvelopeAsItWas() {
+        bus.registerChannel("one");
+        Envelope e = Envelope.documentFactory();
+        DLC.addRoute("missing", "step", e);
+        DLC.addRoute("one", "step", e);
+        e.ratchet();
+
+        Assert.assertFalse(bus.completed(e));
+        Assert.assertEquals("one", e.getRoute().getService());
+        Assert.assertEquals(Integer.valueOf(1), e.getDynamicRoutingSlip().numberRemainingRoutes());
+        Assert.assertEquals("missing", e.getDynamicRoutingSlip().peekAtNextRoute().getService());
+    }
+
+    @Test
+    public void handOverRefusedByTheNextStagePutsTheRouteBack() {
+        bus.registerChannel("one");
+        bus.registerChannel("two");
+        bus.registerAsynchConsumer("two", e -> true);
+        Envelope e = Envelope.documentFactory();
+        DLC.addRoute("two", "step", e);
+        DLC.addRoute("one", "step", e);
+        e.ratchet();
+
+        bus.pause();
+        Assert.assertFalse(bus.completed(e));
+        Assert.assertEquals("one", e.getRoute().getService());
+        Assert.assertEquals(Integer.valueOf(1), e.getDynamicRoutingSlip().numberRemainingRoutes());
+        Assert.assertEquals("two", e.getDynamicRoutingSlip().peekAtNextRoute().getService());
+
+        bus.unpause();
+        Assert.assertTrue("the same envelope can be handed on once the stage accepts again", bus.completed(e));
+        Assert.assertEquals("two", e.getRoute().getService());
+    }
+
+    @Test
+    public void failedHandOverKeepsTheEnvelopeAndDoesNotRunTheStageAgain() throws Exception {
+        String base = System.getProperty("java.io.tmpdir") + "/seda-handover-" + System.nanoTime();
+        Properties p = new Properties();
+        p.setProperty("ra.sedabus.channel.locationBase", base);
+        SEDABus durableBus = new SEDABus();
+        durableBus.start(p);
+        try {
+            AtomicInteger runs = new AtomicInteger();
+            durableBus.registerChannel("first", 50, ServiceLevel.AtLeastOnce, null, false);
+            durableBus.registerAsynchConsumer("first", e -> {
+                runs.incrementAndGet();
+                return true;
+            });
+            Envelope e = Envelope.documentFactory();
+            e.setServiceLevel(ServiceLevel.AtLeastOnce);
+            DLC.addRoute("missing", "step", e);
+            DLC.addRoute("first", "step", e);
+            Assert.assertTrue(durableBus.publish(e));
+            Thread.sleep(1000);
+
+            Assert.assertEquals("the stage's work is done once, not once per hand-over attempt", 1, runs.get());
+            File dir = new File(base, "first");
+            File deadLetter = new File(dir, "deadLetter.json");
+            Assert.assertTrue("an envelope that cannot be handed on is dead-lettered, not lost", deadLetter.exists());
+            Assert.assertTrue(new String(java.nio.file.Files.readAllBytes(deadLetter.toPath())).contains(e.getId()));
+            File[] left = dir.listFiles((d, n) -> n.endsWith(".json") && !n.equals("deadLetter.json"));
+            Assert.assertTrue(left == null || left.length == 0);
+        } finally {
+            durableBus.gracefulShutdown();
+        }
+    }
+
+    @Test
     public void rejectsWhenChannelAtCapacity() {
         CountDownLatch gate = new CountDownLatch(1);
         bus.registerChannel("slow", 2, ServiceLevel.AtMostOnce, null, false);

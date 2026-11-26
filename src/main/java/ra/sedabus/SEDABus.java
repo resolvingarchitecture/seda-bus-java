@@ -3,6 +3,7 @@ package ra.sedabus;
 import ra.common.Client;
 import ra.common.Config;
 import ra.common.Envelope;
+import ra.common.route.Route;
 import ra.common.Status;
 import ra.common.messaging.MessageBus;
 import ra.common.messaging.MessageChannel;
@@ -92,26 +93,43 @@ public class SEDABus implements MessageBus {
      */
     @Override
     public boolean completed(Envelope e) {
-        boolean moreRoutes = e.getDynamicRoutingSlip() != null
-                && e.getDynamicRoutingSlip().peekAtNextRoute() != null;
-        if (moreRoutes) {
-            e.ratchet();
-            MessageChannel next = lookupChannel(e);
+        Route upcoming = e.getDynamicRoutingSlip() == null ? null : e.getDynamicRoutingSlip().peekAtNextRoute();
+        if (upcoming != null) {
+            // Find the next stage before moving the envelope on, so an unknown stage leaves it exactly as it was.
+            MessageChannel next = namedChannel(upcoming.getService(), e);
             if (next == null) {
-                LOG.warning("routing slip points at unknown channel for " + e.getId());
                 return false;
             }
+            Route previous = e.getRoute();
+            e.ratchet();
             boolean queued = next.send(e);
             if (queued) {
                 pool.schedule(next);
+                return true;
             }
-            return queued;
+            // The next stage did not take it (full, paused or refused): put the envelope back where it was, so the
+            // stage that finished it can try again instead of losing it.
+            e.getDynamicRoutingSlip().addRoute(upcoming);
+            e.setRoute(previous);
+            return false;
         }
         Client client = callbacks.remove(e.getId());
         if (client != null) {
             client.reply(e);
         }
         return true;
+    }
+
+    private MessageChannel namedChannel(String service, Envelope e) {
+        if (service == null) {
+            LOG.warning("no service/channel name on the next route of envelope " + e.getId());
+            return null;
+        }
+        MessageChannel channel = namedChannels.get(service);
+        if (channel == null) {
+            LOG.warning("no channel registered for service " + service + " (envelope " + e.getId() + ")");
+        }
+        return channel;
     }
 
     private MessageChannel lookupChannel(Envelope e) {

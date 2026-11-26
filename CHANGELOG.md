@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+- Fixed: an envelope is no longer lost when the next stage cannot take it. `SEDABus.completed` finds the next stage
+  before moving the envelope's route on, and puts the route back if the stage refuses (full, paused or unknown); the
+  channel acknowledges (deletes the persisted copy) only after the next stage accepted, retries only the hand-over (the
+  stage's own work is not run again), and dead-letters after `maxAttempts`. `ExactlyOnce` marks an envelope delivered
+  only after the hand-over.
+- Fixed: the first dead letter could never be written (`deadLetter.json` was opened append-only without creating it).
+
 ## 1.3.1
 - Compile target lowered Java 17 -> 11 (the code uses no post-11 features). Keeps
   seda-bus consumable by Java 11 downstreams (`service-bus`, `1m5-desktop-java`).
