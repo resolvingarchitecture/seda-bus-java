@@ -9,6 +9,11 @@
 - Fixed: dead-lettering on a channel with no store directory (AtMostOnce) discarded the envelope silently. It is now
   kept in a bounded in-memory list (`SEDAMessageChannel.inMemoryDeadLetters()`, 1,000 most recent, lost on restart) and
   counted (`deadLetterCount()`), and a warning names it.
+- Fixed: `DropOldest` left the evicted envelope's persisted file behind, so it was replayed after a restart; the file is
+  now deleted, the eviction is logged and counted (`SEDAMessageChannel.evictedCount()`), and the producer is told.
+- Fixed: `SEDABus` kept the producer callback of an envelope that was dead-lettered, so the map grew and the producer
+  waited for ever. The callback is released and the producer's reply carries an error message saying what happened.
+- Fixed: `deliversPointToPoint` was flaky (20 publishes into a channel of capacity 10); it now has room for the burst.
 - Fixed: the first dead letter could never be written (`deadLetter.json` was opened append-only without creating it).
 
 ## 1.3.1

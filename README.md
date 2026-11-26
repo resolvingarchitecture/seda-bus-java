@@ -85,11 +85,6 @@ port verifies against). All tests below live in `SEDABusTest.java`.
 | C6 | No thread leak across repeated create/shutdown cycles | `repeatedLifecyclesDoNotLeakThreads` |
 | C7 | Concurrent producers deliver exactly once | `manyProducersDeliverEverything` |
 
-**Known issue, not part of this suite:** `deliversPointToPoint` is flaky
-under repeated back-to-back runs (bursts 20 ungated publishes against the
-default capacity of 10); pre-existing, unrelated to backpressure/correctness
-work, not yet fixed.
-
 ## Companion implementations
 
 Same design, other languages:

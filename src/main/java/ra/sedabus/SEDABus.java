@@ -2,6 +2,7 @@ package ra.sedabus;
 
 import ra.common.Client;
 import ra.common.Config;
+import ra.common.DLC;
 import ra.common.Envelope;
 import ra.common.route.Route;
 import ra.common.Status;
@@ -118,6 +119,23 @@ public class SEDABus implements MessageBus {
             client.reply(e);
         }
         return true;
+    }
+
+    /**
+     * Called by a channel when it gives up on an envelope (dead-lettered, or evicted to make room): releases the producer's
+     * callback, so the map does not keep it for ever, and tells the producer, with an error message on the envelope.
+     */
+    void failed(Envelope e, String reason) {
+        Client client = callbacks.remove(e.getId());
+        if (client != null) {
+            DLC.addErrorMessage(reason, e);
+            client.reply(e);
+        }
+    }
+
+    /** How many producer callbacks are waiting for their envelope to finish. */
+    int pendingCallbacks() {
+        return callbacks.size();
     }
 
     private MessageChannel namedChannel(String service, Envelope e) {

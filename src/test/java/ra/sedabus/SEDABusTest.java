@@ -51,7 +51,8 @@ public class SEDABusTest {
         CountDownLatch latch = new CountDownLatch(20);
         AtomicInteger a = new AtomicInteger();
         AtomicInteger b = new AtomicInteger();
-        bus.registerChannel("work");
+        // Room for the whole burst: with the default capacity of 10 some of the 20 publishes could be rejected.
+        bus.registerChannel("work", 100, ServiceLevel.AtMostOnce, null, false);
         bus.registerAsynchConsumer("work", e -> {
             a.incrementAndGet();
             latch.countDown();
@@ -214,6 +215,76 @@ public class SEDABusTest {
         }
         Assert.assertEquals(SEDAMessageChannel.MAX_IN_MEMORY_DEAD_LETTERS, channel.inMemoryDeadLetters().size());
         Assert.assertEquals(SEDAMessageChannel.MAX_IN_MEMORY_DEAD_LETTERS + 5, channel.deadLetterCount());
+    }
+
+    @Test
+    public void deadLetteredEnvelopeReleasesAndNotifiesItsProducer() throws Exception {
+        bus.registerChannel("fails", 10, ServiceLevel.AtMostOnce, null, false);
+        bus.registerAsynchConsumer("fails", e -> false);
+        CountDownLatch told = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<Envelope> reply = new java.util.concurrent.atomic.AtomicReference<>();
+        Envelope e = Envelope.documentFactory();
+        DLC.addRoute("fails", "handle", e);
+        Assert.assertTrue(bus.publish(e, env -> {
+            reply.set(env);
+            told.countDown();
+        }));
+
+        Assert.assertTrue("the producer is told when its envelope is given up on", await(told, 10));
+        Assert.assertFalse(Envelope.getErrorMessages(reply.get()).isEmpty());
+        Assert.assertTrue(Envelope.getErrorMessages(reply.get()).get(Envelope.getErrorMessages(reply.get()).size() - 1)
+                .contains("dead-lettered"));
+        Assert.assertEquals("the callback is not kept", 0, bus.pendingCallbacks());
+    }
+
+    @Test
+    public void dropOldestDeletesTheEvictedEnvelopesFileAndTellsItsProducer() throws Exception {
+        String base = System.getProperty("java.io.tmpdir") + "/seda-evict-" + System.nanoTime();
+        Properties p = new Properties();
+        p.setProperty("ra.sedabus.channel.locationBase", base);
+        SEDABus durableBus = new SEDABus();
+        durableBus.start(p);
+        try {
+            SEDAMessageChannel channel = (SEDAMessageChannel) durableBus.registerChannel(
+                    "evicting", 1, ServiceLevel.AtLeastOnce, null, false, 1, Backpressure.DropOldest);
+            // The first envelope is held in flight by the consumer, the second waits in the queue (capacity 1), and the
+            // third pushes the second out.
+            CountDownLatch gate = new CountDownLatch(1);
+            CountDownLatch inFlight = new CountDownLatch(1);
+            durableBus.registerAsynchConsumer("evicting", e -> {
+                inFlight.countDown();
+                await(gate, 10);
+                return true;
+            });
+            Envelope first = Envelope.documentFactory();
+            first.setServiceLevel(ServiceLevel.AtLeastOnce);
+            DLC.addRoute("evicting", "handle", first);
+            Assert.assertTrue(durableBus.publish(first));
+            Assert.assertTrue(await(inFlight, 10));
+
+            CountDownLatch told = new CountDownLatch(1);
+            Envelope second = Envelope.documentFactory();
+            second.setServiceLevel(ServiceLevel.AtLeastOnce);
+            DLC.addRoute("evicting", "handle", second);
+            Assert.assertTrue(durableBus.publish(second, env -> told.countDown()));
+            Envelope third = Envelope.documentFactory();
+            third.setServiceLevel(ServiceLevel.AtLeastOnce);
+            DLC.addRoute("evicting", "handle", third);
+            Assert.assertTrue(durableBus.publish(third));
+
+            Assert.assertTrue("the evicted envelope's producer is told", await(told, 10));
+            Assert.assertEquals(1, channel.evictedCount());
+            File[] files = new File(base, "evicting").listFiles((d, n) -> n.endsWith(".json"));
+            Assert.assertNotNull(files);
+            Assert.assertEquals("the one in flight and the one queued are kept; the evicted one is gone", 2, files.length);
+            for (File f : files) {
+                Assert.assertFalse(f.getName().contains(second.getId()));
+            }
+            Assert.assertEquals(0, durableBus.pendingCallbacks());
+            gate.countDown();
+        } finally {
+            durableBus.gracefulShutdown();
+        }
     }
 
     @Test

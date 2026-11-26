@@ -88,6 +88,7 @@ final class SEDAMessageChannel implements MessageChannel {
     public static final int MAX_IN_MEMORY_DEAD_LETTERS = 1000;
     /** Dead letters of a channel with no store directory (AtMostOnce), newest last. */
     private final java.util.Deque<Envelope> inMemoryDeadLetters = new java.util.concurrent.ConcurrentLinkedDeque<>();
+    private final java.util.concurrent.atomic.AtomicLong evictedCount = new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deadLetterCount = new java.util.concurrent.atomic.AtomicLong();
     /** Envelopes this stage has handled but could not yet hand to the next stage. */
     private final java.util.Set<String> awaitingForward = ConcurrentHashMap.newKeySet();
@@ -225,7 +226,10 @@ final class SEDAMessageChannel implements MessageChannel {
         switch (backpressure) {
             case DropOldest:
                 while (!queue.offer(e)) {
-                    queue.poll(); // evict oldest to make room; null is a benign race (already drained)
+                    Envelope evicted = queue.poll(); // evict oldest to make room; null is a benign race (already drained)
+                    if (evicted != null) {
+                        evicted(evicted);
+                    }
                 }
                 return true;
             case Block:
@@ -241,6 +245,29 @@ final class SEDAMessageChannel implements MessageChannel {
             default:
                 return queue.offer(e);
         }
+    }
+
+    /**
+     * An envelope pushed out of the queue by {@link Backpressure#DropOldest}: say so, delete its persisted copy (or it
+     * would be replayed after a restart as if nothing had happened), forget its retry state, and tell its producer.
+     */
+    private void evicted(Envelope envelope) {
+        evictedCount.incrementAndGet();
+        LOG.warning("channel " + name + ": evicted " + envelope.getId() + " to make room (DropOldest); "
+                + evictedCount.get() + " evicted so far");
+        ack(envelope);
+        failedToBus(envelope, "channel " + name + " evicted this envelope to make room (DropOldest)");
+    }
+
+    private void failedToBus(Envelope envelope, String reason) {
+        if (bus instanceof SEDABus) {
+            ((SEDABus) bus).failed(envelope, reason);
+        }
+    }
+
+    /** How many envelopes {@link Backpressure#DropOldest} has pushed out of this channel since it started. */
+    public long evictedCount() {
+        return evictedCount.get();
     }
 
     @Override
@@ -330,6 +357,7 @@ final class SEDAMessageChannel implements MessageChannel {
             LOG.warning("channel " + name + ": envelope " + envelope.getId() + " has no operation; dead-lettering");
             deadLetter(envelope);
             ack(envelope);
+            failedToBus(envelope, "channel " + name + " dead-lettered this envelope: it has no operation");
             return;
         }
 
@@ -363,11 +391,13 @@ final class SEDAMessageChannel implements MessageChannel {
                 LOG.warning("channel " + name + ": no room to retry " + envelope.getId() + "; dead-lettering");
                 deadLetter(envelope);
                 ack(envelope);
+                failedToBus(envelope, "channel " + name + " dead-lettered this envelope: no room to retry");
             }
         } else {
             LOG.warning("channel " + name + ": " + envelope.getId() + " failed " + n + " attempts; dead-lettering");
             deadLetter(envelope);
             ack(envelope);
+            failedToBus(envelope, "channel " + name + " dead-lettered this envelope after " + n + " attempts");
         }
     }
 
